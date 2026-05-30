@@ -30,6 +30,47 @@ def test_url_fragment_is_preserved_when_wrapped(tmp_path: Path) -> None:
     }
 
 
+def test_bare_localhost_port_builds_remote_localhost_request(tmp_path: Path) -> None:
+    request = build("localhost:8080", tmp_path)
+
+    assert request == {
+        "version": 1,
+        "action": "open_remote_localhost",
+        "scheme": "http",
+        "remote_host": "localhost",
+        "remote_port": 8080,
+        "path": "",
+        "query": "",
+        "fragment": "",
+        "ssh_host": "devbox",
+    }
+
+
+def test_localhost_url_preserves_path_query_and_fragment(tmp_path: Path) -> None:
+    request = build("(https://127.0.0.1:8888/lab/tree/notebook.ipynb?token=abc#cell)", tmp_path)
+
+    assert request == {
+        "version": 1,
+        "action": "open_remote_localhost",
+        "scheme": "https",
+        "remote_host": "127.0.0.1",
+        "remote_port": 8888,
+        "path": "/lab/tree/notebook.ipynb",
+        "query": "token=abc",
+        "fragment": "cell",
+        "ssh_host": "devbox",
+    }
+
+
+def test_unspecified_bind_address_maps_to_loopback(tmp_path: Path) -> None:
+    request = build("http://0.0.0.0:3000/app", tmp_path)
+
+    assert request is not None
+    assert request["action"] == "open_remote_localhost"
+    assert request["remote_host"] == "127.0.0.1"
+    assert request["remote_port"] == 3000
+
+
 def test_python_traceback_uses_innermost_frame(tmp_path: Path) -> None:
     outer = touch(tmp_path / "app.py")
     inner = touch(tmp_path / "src" / "worker.py")

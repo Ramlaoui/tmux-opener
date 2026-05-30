@@ -447,8 +447,18 @@ def socket_owner_pids(socket_path: Path) -> list[int]:
     return socket_owner_pids_linux(socket_path) or socket_owner_pids_lsof(socket_path)
 
 
+def client_pid_from_ping_response(response: dict[str, object] | None) -> int | None:
+    if not response:
+        return None
+    pid = response.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return None
+    return pid
+
+
 def stop_client(socket_path: Path, dry_run: bool) -> None:
-    if not ping_client(socket_path):
+    ping_response, _ping_error = client_ping_response(socket_path)
+    if not bool(ping_response and ping_response.get("ok")):
         if socket_path.exists():
             if dry_run:
                 print(f"would remove stale local socket: {socket_path}")
@@ -458,7 +468,8 @@ def stop_client(socket_path: Path, dry_run: bool) -> None:
             print(f"local client already stopped: {socket_path}")
         return
 
-    pids = socket_owner_pids(socket_path)
+    client_pid = client_pid_from_ping_response(ping_response)
+    pids = [client_pid] if client_pid is not None else socket_owner_pids(socket_path)
     if not pids:
         raise SystemExit(
             f"tmux-opener: local client answered on {socket_path}, "
@@ -474,6 +485,24 @@ def stop_client(socket_path: Path, dry_run: bool) -> None:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError as exc:
+            if socket_path.exists():
+                try:
+                    socket_path.unlink()
+                except OSError as unlink_exc:
+                    raise SystemExit(
+                        f"tmux-opener: permission denied stopping local client pid {pid} "
+                        f"for {socket_path}: {exc}; also failed to replace socket path: {unlink_exc}"
+                    ) from unlink_exc
+                print(
+                    f"warning: permission denied stopping local client pid {pid}; "
+                    f"replaced socket path {socket_path}"
+                )
+                return
+            raise SystemExit(
+                f"tmux-opener: permission denied stopping local client pid {pid} "
+                f"for {socket_path}: {exc}"
+            ) from exc
 
     deadline = time.time() + 2.0
     while time.time() < deadline:
@@ -564,6 +593,23 @@ def next_action(
     return f"connect with `tmux-opener ssh {host}`"
 
 
+def print_remote_localhost_forwards(ping_response: dict[str, object], label: str = "remote localhost forwards") -> None:
+    forwards = ping_response.get("remote_localhost_forwards")
+    if not isinstance(forwards, list) or not forwards:
+        print(f"{label}: none")
+        return
+
+    print(f"{label}:")
+    for forward in forwards:
+        if not isinstance(forward, dict):
+            continue
+        ssh_host = forward.get("ssh_host", "unknown")
+        remote_host = forward.get("remote_host", "localhost")
+        remote_port = forward.get("remote_port", "unknown")
+        local_port = forward.get("local_port", "unknown")
+        print(f"  {ssh_host} {remote_host}:{remote_port} -> 127.0.0.1:{local_port}")
+
+
 def doctor(args: argparse.Namespace) -> None:
     host = infer_host(args)
     socket_path = local_socket_path(args, host)
@@ -598,6 +644,7 @@ def doctor(args: argparse.Namespace) -> None:
     if ping_response:
         print(f"local client pid: {ping_response.get('pid', 'unknown')}")
         print(f"local client default SSH host: {ping_response.get('default_ssh_host') or 'unset'}")
+        print_remote_localhost_forwards(ping_response)
     elif ping_error:
         print(f"local client error: {ping_error}")
     print(f"expected remote socket: {remote_socket}")
@@ -629,6 +676,7 @@ def status(args: argparse.Namespace) -> None:
     if ping_response:
         print(f"client pid: {ping_response.get('pid', 'unknown')}")
         print(f"client default SSH host: {ping_response.get('default_ssh_host') or 'unset'}")
+        print_remote_localhost_forwards(ping_response)
     elif ping_error:
         print(f"client error: {ping_error}")
     print(f"log path: {log_path}")

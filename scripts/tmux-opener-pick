@@ -78,6 +78,16 @@ def request_key(candidate: str, cwd: str) -> tuple[object, ...] | None:
         return None
     if request.get("action") == "open_url":
         return ("url", request.get("url"))
+    if request.get("action") == "open_remote_localhost":
+        return (
+            "remote_localhost",
+            request.get("scheme"),
+            request.get("remote_host"),
+            request.get("remote_port"),
+            request.get("path"),
+            request.get("query"),
+            request.get("fragment"),
+        )
     if request.get("action") == "open_vscode_remote":
         return (
             "path",

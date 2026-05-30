@@ -14,6 +14,12 @@ from pathlib import Path
 
 
 URL_RE = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*://|mailto:)")
+LOCALHOST_TOKEN_RE = re.compile(
+    r"^(?:(?P<scheme>https?)://)?"
+    r"(?P<host>localhost|127\.0\.0\.1|0\.0\.0\.0)"
+    r":(?P<port>[1-9][0-9]{0,4})"
+    r"(?P<tail>[/?#]\S*)?$"
+)
 LINE_RE = re.compile(r"^(?P<path>.*?)(?::(?P<line>[1-9][0-9]*))(?::(?P<column>[1-9][0-9]*))?$")
 PYTHON_TRACEBACK_RE = re.compile(
     r"\bFile\s+(?P<quote>[\"'])(?P<path>.*?)(?P=quote),\s+line\s+(?P<line>[1-9][0-9]*)"
@@ -64,6 +70,12 @@ def describe_request(request: dict[str, object]) -> str:
     action = str(request.get("action", "unknown"))
     if action == "open_url":
         return f"action=open_url url={request.get('url')}"
+    if action == "open_remote_localhost":
+        return (
+            "action=open_remote_localhost "
+            f"host={request.get('ssh_host', 'default')} "
+            f"remote_port={request.get('remote_port')}"
+        )
     if action == "open_vscode_remote":
         return (
             "action=open_vscode_remote "
@@ -89,6 +101,32 @@ def clean_selection(text: str) -> str:
 
 def is_open_url(text: str) -> bool:
     return URL_RE.match(text) is not None and not text.startswith("file:")
+
+
+def parse_remote_localhost(text: str) -> dict[str, object] | None:
+    text = strip_wrapping_punctuation(clean_selection(text))
+    match = LOCALHOST_TOKEN_RE.match(text)
+    if not match:
+        return None
+
+    port = int(match.group("port"))
+    if not 1 <= port <= 65535:
+        return None
+
+    scheme = match.group("scheme") or "http"
+    host = match.group("host")
+    remote_host = "127.0.0.1" if host == "0.0.0.0" else host
+    url = text if match.group("scheme") else f"{scheme}://{text}"
+    parsed = urllib.parse.urlparse(url)
+
+    return {
+        "scheme": scheme,
+        "remote_host": remote_host,
+        "remote_port": port,
+        "path": parsed.path or "",
+        "query": parsed.query or "",
+        "fragment": parsed.fragment or "",
+    }
 
 
 def strip_wrapping_punctuation(text: str) -> str:
@@ -247,10 +285,15 @@ def extract_file_target(text: str, cwd: str) -> str | None:
 
 def extract_target(text: str, cwd: str) -> str | None:
     text = clean_selection(text)
+    if parse_remote_localhost(text):
+        return text
+
     if is_open_url(text):
         return text
 
     for variant in candidate_variants(text):
+        if parse_remote_localhost(variant):
+            return variant
         if is_open_url(variant):
             return variant
 
@@ -267,6 +310,16 @@ def build_request(selection: str, cwd: str, ssh_host: str | None) -> dict[str, o
     target = extract_target(selection, cwd)
     if not target:
         return None
+
+    if remote_localhost := parse_remote_localhost(target):
+        request: dict[str, object] = {
+            "version": 1,
+            "action": "open_remote_localhost",
+            **remote_localhost,
+        }
+        if ssh_host:
+            request["ssh_host"] = ssh_host
+        return request
 
     if is_open_url(target):
         return {
@@ -351,6 +404,10 @@ def fallback_message(request: dict[str, object] | None, message: str, mode: str)
             print(f"tmux-opener: {message}; no SSH host available for OSC 8 fallback", file=sys.stderr)
             return 1
         print(osc8(uri, f"Open in VS Code: {request['path']}"))
+        return 1
+
+    if request and request.get("action") == "open_remote_localhost":
+        print(f"tmux-opener: {message}; remote localhost forwarding requires the bridge", file=sys.stderr)
         return 1
 
     print(f"tmux-opener: {message}", file=sys.stderr)
