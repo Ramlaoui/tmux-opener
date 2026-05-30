@@ -424,6 +424,8 @@ def ensure_remote_localhost_forward(
     command = [
         shutil.which("ssh") or "ssh",
         "-N",
+        "-S",
+        "none",
         "-o",
         "ExitOnForwardFailure=yes",
         "-o",

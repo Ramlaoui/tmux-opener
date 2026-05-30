@@ -67,7 +67,7 @@ def test_remote_localhost_dry_run_starts_tunnel_and_opens_rewritten_url(
 
     output = capsys.readouterr().out
     assert (
-        f"dry-run tunnel: {FAKE_SSH} -N -o ExitOnForwardFailure=yes "
+        f"dry-run tunnel: {FAKE_SSH} -N -S none -o ExitOnForwardFailure=yes "
         "-o ForkAfterAuthentication=no "
         "-L 127.0.0.1:18080:localhost:8080 devbox"
     ) in output
