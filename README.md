@@ -99,6 +99,23 @@ tmux-opener ssh --dry-run --no-start-client HOST
 Inside remote tmux copy mode, select a URL or path and press `o`. If `fzf` is
 installed, the prefix target picker also uses `o` by default.
 
+Remote localhost URLs are treated as remote services, not local desktop
+services. For example:
+
+```sh
+tmux-opener-send localhost:8080
+tmux-opener-send http://127.0.0.1:8888/lab?token=abc
+```
+
+The local client starts or reuses an SSH tunnel such as:
+
+```sh
+ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:localhost:8080 HOST
+```
+
+and opens the rewritten local URL, for example
+`http://127.0.0.1:18080`.
+
 Remove a managed host snippet with:
 
 ```sh
@@ -114,6 +131,7 @@ Defaults:
 - Remote socket: `/tmp/tmux-opener-$USER.sock`
 - Remote folders open in a new VS Code Remote-SSH window
 - Remote files open in the current VS Code Remote-SSH window
+- Remote `localhost:PORT` URLs open through a local SSH `-L` tunnel
 - Fallback: if the bridge is unavailable, copy-mode uses same-host `open` or
   `xdg-open`
 - Route feedback: tmux briefly displays which route was used
@@ -172,6 +190,8 @@ tmux-opener-client \
   --socket ~/.local/state/tmux-opener/HOST.sock \
   --default-ssh-host HOST \
   --allow-ssh-host HOST \
+  --localhost-forward-start-port 18000 \
+  --localhost-forward-end-port 18999 \
   --dry-run
 ```
 

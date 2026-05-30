@@ -564,6 +564,23 @@ def next_action(
     return f"connect with `tmux-opener ssh {host}`"
 
 
+def print_remote_localhost_forwards(ping_response: dict[str, object], label: str = "remote localhost forwards") -> None:
+    forwards = ping_response.get("remote_localhost_forwards")
+    if not isinstance(forwards, list) or not forwards:
+        print(f"{label}: none")
+        return
+
+    print(f"{label}:")
+    for forward in forwards:
+        if not isinstance(forward, dict):
+            continue
+        ssh_host = forward.get("ssh_host", "unknown")
+        remote_host = forward.get("remote_host", "localhost")
+        remote_port = forward.get("remote_port", "unknown")
+        local_port = forward.get("local_port", "unknown")
+        print(f"  {ssh_host} {remote_host}:{remote_port} -> 127.0.0.1:{local_port}")
+
+
 def doctor(args: argparse.Namespace) -> None:
     host = infer_host(args)
     socket_path = local_socket_path(args, host)
@@ -598,6 +615,7 @@ def doctor(args: argparse.Namespace) -> None:
     if ping_response:
         print(f"local client pid: {ping_response.get('pid', 'unknown')}")
         print(f"local client default SSH host: {ping_response.get('default_ssh_host') or 'unset'}")
+        print_remote_localhost_forwards(ping_response)
     elif ping_error:
         print(f"local client error: {ping_error}")
     print(f"expected remote socket: {remote_socket}")
@@ -629,6 +647,7 @@ def status(args: argparse.Namespace) -> None:
     if ping_response:
         print(f"client pid: {ping_response.get('pid', 'unknown')}")
         print(f"client default SSH host: {ping_response.get('default_ssh_host') or 'unset'}")
+        print_remote_localhost_forwards(ping_response)
     elif ping_error:
         print(f"client error: {ping_error}")
     print(f"log path: {log_path}")
