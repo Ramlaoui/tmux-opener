@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""Local tmux opener client."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import urllib.parse
+from datetime import datetime
+from pathlib import Path
+
+
+HOST_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
+DEFAULT_URL_SCHEMES = ("http", "https")
+DEFAULT_VSCODE_FOLDER_WINDOW = "new"
+DEFAULT_VSCODE_FILE_WINDOW = "reuse"
+VSCODE_WINDOW_POLICIES = ("new", "reuse")
+
+
+class RequestError(Exception):
+    pass
+
+
+def default_socket_path() -> str:
+    return os.path.expanduser("~/.local/state/tmux-opener/opener.sock")
+
+
+def read_request(conn: socket.socket) -> dict[str, object]:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > 1024 * 1024:
+            raise RequestError("request is too large")
+        if b"\n" in chunk:
+            break
+
+    raw = b"".join(chunks).split(b"\n", 1)[0]
+    if not raw:
+        raise RequestError("empty request")
+
+    try:
+        request = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RequestError(f"invalid json: {exc}") from exc
+
+    if not isinstance(request, dict):
+        raise RequestError("request must be a JSON object")
+    if request.get("version") != 1:
+        raise RequestError("unsupported request version")
+    return request
+
+
+def send_response(conn: socket.socket, response: dict[str, object]) -> None:
+    conn.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
+
+
+def ping_response(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "ok": True,
+        "client": "tmux-opener-client",
+        "pid": os.getpid(),
+        "default_ssh_host": args.default_ssh_host,
+        "allowed_ssh_hosts": sorted(args.allow_ssh_host),
+        "allow_any_ssh_host": bool(args.allow_any_ssh_host),
+    }
+
+
+def command_text(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def log_line(message: str) -> None:
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    print(f"{timestamp} {message}", flush=True)
+
+
+def launch_command(
+    command: list[str],
+    dry_run: bool,
+    verbose: bool,
+    command_label: str | None = None,
+) -> None:
+    command_display = command_text(command)
+    label = f" {command_label}" if command_label else ""
+    if dry_run:
+        log_line(f"dry-run{label}: {command_display}")
+        return
+
+    log_line(f"launch{label}: {command_display}")
+
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as exc:
+        raise RequestError(f"failed to launch {command_display}: {exc}") from exc
+
+    threading.Thread(target=reap_child, args=(process, command_display), daemon=True).start()
+
+
+def reap_child(process: subprocess.Popen[bytes], command_display: str) -> None:
+    returncode = process.wait()
+    if returncode:
+        log_line(f"launch exited nonzero rc={returncode}: {command_display}")
+
+
+def open_with_system(target: str, dry_run: bool, verbose: bool) -> None:
+    system = platform.system()
+    if system == "Darwin":
+        command = ["open", target]
+    elif system == "Windows":
+        command = ["cmd", "/c", "start", "", target]
+    else:
+        command = ["xdg-open", target]
+
+    launch_command(command, dry_run, verbose)
+
+
+def validate_url(url: object, allowed_schemes: set[str]) -> str:
+    if not isinstance(url, str):
+        raise RequestError("url must be a string")
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in allowed_schemes:
+        raise RequestError(f"url scheme is not allowed: {parsed.scheme}")
+    if not parsed.netloc and parsed.scheme in {"http", "https"}:
+        raise RequestError("url must include a host")
+    return url
+
+
+def validate_host(host: object, allowed_hosts: set[str] | None) -> str:
+    if not isinstance(host, str) or not host:
+        raise RequestError("ssh_host must be a non-empty string")
+    if not HOST_RE.match(host):
+        raise RequestError("ssh_host contains unsupported characters")
+    if allowed_hosts is not None and host not in allowed_hosts:
+        raise RequestError(f"ssh_host is not allowed: {host}")
+    return host
+
+
+def validate_path(path: object) -> str:
+    if not isinstance(path, str) or not path.startswith("/"):
+        raise RequestError("path must be an absolute remote path")
+    if "\x00" in path:
+        raise RequestError("path contains a NUL byte")
+    return path
+
+
+def validate_target_type(target_type: object) -> str:
+    if target_type in (None, "file"):
+        return "file"
+    if target_type == "folder":
+        return "folder"
+    raise RequestError(f"unsupported target_type: {target_type}")
+
+
+def vscode_remote_uri(host: str, path: str) -> str:
+    host_q = urllib.parse.quote(host, safe="@.-_:")
+    path_q = urllib.parse.quote(path, safe="/:._-")
+    return f"vscode-remote://ssh-remote+{host_q}{path_q}"
+
+
+def vscode_remote_authority(host: str) -> str:
+    return f"ssh-remote+{host}"
+
+
+def vscode_app_url(host: str, path: str) -> str:
+    host_q = urllib.parse.quote(host, safe="@.-_:")
+    path_q = urllib.parse.quote(path, safe="/:._-")
+    return f"vscode://vscode-remote/ssh-remote+{host_q}{path_q}"
+
+
+def vscode_window_flags(policy: str) -> list[str]:
+    if policy == "new":
+        return ["--new-window"]
+    if policy == "reuse":
+        return ["--reuse-window"]
+    raise RequestError(f"unsupported VS Code window policy: {policy}")
+
+
+def open_vscode_remote(
+    request: dict[str, object],
+    allowed_hosts: set[str] | None,
+    dry_run: bool,
+    verbose: bool,
+    folder_window: str = DEFAULT_VSCODE_FOLDER_WINDOW,
+    file_window: str = DEFAULT_VSCODE_FILE_WINDOW,
+) -> None:
+    host = validate_host(request.get("ssh_host"), allowed_hosts)
+    path = validate_path(request.get("path"))
+    target_type = validate_target_type(request.get("target_type"))
+    line = request.get("line")
+    column = request.get("column")
+
+    code = shutil.which("code")
+    if code:
+        remote_target = path
+        if target_type == "file" and isinstance(line, int):
+            remote_target = f"{remote_target}:{line}"
+            if isinstance(column, int):
+                remote_target = f"{remote_target}:{column}"
+
+        window_policy = folder_window if target_type == "folder" else file_window
+        window_flags = vscode_window_flags(window_policy)
+        goto_flags = ["--goto"] if target_type == "file" and isinstance(line, int) else []
+        command = [
+            code,
+            *window_flags,
+            *goto_flags,
+            "--remote",
+            vscode_remote_authority(host),
+            remote_target,
+        ]
+        launch_command(command, dry_run, verbose, command_label="code")
+        return
+
+    open_with_system(vscode_app_url(host, path), dry_run, verbose)
+
+
+def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
+    action = request.get("action")
+    if args.verbose:
+        log_line(f"request: {json.dumps(request, sort_keys=True)}")
+
+    if action == "ping":
+        return
+
+    if action == "open_url":
+        open_with_system(
+            validate_url(request.get("url"), set(args.allow_url_scheme)),
+            args.dry_run,
+            args.verbose,
+        )
+        return
+
+    if action == "open_vscode_remote":
+        if "ssh_host" not in request and args.default_ssh_host:
+            request = {**request, "ssh_host": args.default_ssh_host}
+        if args.allow_any_ssh_host:
+            allowed_hosts = None
+        elif args.allow_ssh_host:
+            allowed_hosts = set(args.allow_ssh_host)
+        else:
+            raise RequestError("no SSH hosts are allowed; pass --allow-ssh-host HOST")
+        open_vscode_remote(
+            request,
+            allowed_hosts,
+            args.dry_run,
+            args.verbose,
+            folder_window=args.vscode_folder_window,
+            file_window=args.vscode_file_window,
+        )
+        return
+
+    raise RequestError(f"unsupported action: {action}")
+
+
+def serve_once(server: socket.socket, args: argparse.Namespace) -> None:
+    conn, _addr = server.accept()
+    with conn:
+        try:
+            request = read_request(conn)
+            if request.get("action") == "ping":
+                send_response(conn, ping_response(args))
+                return
+            dispatch(request, args)
+        except RequestError as exc:
+            log_line(f"reject: {exc}")
+            send_response(conn, {"ok": False, "error": str(exc)})
+            return
+        send_response(conn, {"ok": True})
+
+
+def bind_server(socket_path: str) -> socket.socket:
+    path = Path(socket_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(path))
+    os.chmod(path, 0o600)
+    server.listen(16)
+    return server
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--socket", default=default_socket_path(), help="local Unix socket path")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--verbose", action="store_true", help="log full received request payloads")
+    parser.add_argument("--once", action="store_true", help="serve one request and exit")
+    parser.add_argument("--allow-url-scheme", action="append", default=list(DEFAULT_URL_SCHEMES))
+    parser.add_argument("--allow-ssh-host", action="append", default=[])
+    parser.add_argument("--allow-any-ssh-host", action="store_true")
+    parser.add_argument("--default-ssh-host")
+    parser.add_argument(
+        "--vscode-folder-window",
+        choices=VSCODE_WINDOW_POLICIES,
+        default=DEFAULT_VSCODE_FOLDER_WINDOW,
+        help="VS Code window policy for remote folders (default: new)",
+    )
+    parser.add_argument(
+        "--vscode-file-window",
+        choices=VSCODE_WINDOW_POLICIES,
+        default=DEFAULT_VSCODE_FILE_WINDOW,
+        help="VS Code window policy for remote files (default: reuse)",
+    )
+    args = parser.parse_args()
+
+    server = bind_server(args.socket)
+    stop = False
+
+    def handle_signal(_signum: int, _frame: object) -> None:
+        nonlocal stop
+        stop = True
+        server.close()
+
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    log_line(f"tmux-opener-client listening on {args.socket}")
+    try:
+        while not stop:
+            serve_once(server, args)
+            if args.once:
+                break
+    except OSError:
+        if not stop:
+            raise
+    finally:
+        try:
+            Path(args.socket).unlink()
+        except FileNotFoundError:
+            pass
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

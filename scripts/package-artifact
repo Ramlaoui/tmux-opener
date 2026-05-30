@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/package-artifact server|client [VERSION]
+
+Build a release archive in dist/.
+
+VERSION defaults to $GITHUB_REF_NAME, then "dev". Shared version tags can be
+used for both archive kinds:
+
+  v0.1.0 -> dist/tmux-opener-server-v0.1.0.tar.gz
+  v0.1.0 -> dist/tmux-opener-client-v0.1.0.tar.gz
+
+Legacy server- and client-prefixed tags are also normalized.
+USAGE
+}
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+kind="${1:-}"
+if [ -z "${kind}" ]; then
+  usage >&2
+  exit 2
+fi
+shift
+
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage
+  exit 0
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+raw_version="${1:-${GITHUB_REF_NAME:-dev}}"
+
+case "${kind}" in
+  server)
+    tag_prefix="server-"
+    archive_prefix="tmux-opener-server"
+    root_name="tmux-opener"
+    readme_source="docs/server-plugin-artifact.md"
+    files=(
+      "tmux-opener.tmux"
+      "scripts/tmux-opener-dispatch"
+      "scripts/tmux-opener-pick"
+      "scripts/tmux-opener-send"
+      "scripts/tmux_opener_common.py"
+    )
+    executable_files=(
+      "tmux-opener.tmux"
+      "scripts/tmux-opener-dispatch"
+      "scripts/tmux-opener-pick"
+      "scripts/tmux-opener-send"
+    )
+    ;;
+  client)
+    tag_prefix="client-"
+    archive_prefix="tmux-opener-client"
+    root_name="tmux-opener-client"
+    readme_source="docs/client-artifact.md"
+    files=(
+      "bin/tmux-opener"
+      "bin/tmux-opener-client"
+    )
+    executable_files=(
+      "bin/tmux-opener"
+      "bin/tmux-opener-client"
+    )
+    ;;
+  *)
+    printf 'unknown artifact kind: %s\n' "${kind}" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+version="${raw_version#"${tag_prefix}"}"
+safe_version="${version//\//-}"
+archive_name="${archive_prefix}-${safe_version}.tar.gz"
+dist_dir="${TMUX_OPENER_DIST_DIR:-${repo_root}/dist}"
+archive_path="${dist_dir}/${archive_name}"
+staging_dir="$(mktemp -d)"
+artifact_dir="${staging_dir}/${root_name}"
+
+cleanup() {
+  rm -rf "${staging_dir}"
+}
+trap cleanup EXIT
+
+mkdir -p "${artifact_dir}" "${dist_dir}"
+
+for file in "${files[@]}"; do
+  mkdir -p "${artifact_dir}/$(dirname "${file}")"
+  cp -p "${repo_root}/${file}" "${artifact_dir}/${file}"
+done
+
+cp -p "${repo_root}/${readme_source}" "${artifact_dir}/README.md"
+
+for file in "${executable_files[@]}"; do
+  chmod +x "${artifact_dir}/${file}"
+done
+
+tar -czf "${archive_path}" -C "${staging_dir}" "${root_name}"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  (
+    cd "${dist_dir}"
+    sha256sum "${archive_name}" >"${archive_name}.sha256"
+  )
+elif command -v shasum >/dev/null 2>&1; then
+  (
+    cd "${dist_dir}"
+    shasum -a 256 "${archive_name}" >"${archive_name}.sha256"
+  )
+fi
+
+printf '%s\n' "${archive_path}"

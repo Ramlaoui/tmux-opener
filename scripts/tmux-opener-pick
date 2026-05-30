@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+"""Pick an opener target from pane text or stdin."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from tmux_opener_common import (
+    build_request,
+    clean_selection,
+    default_log_path,
+    default_socket_path,
+    default_ssh_host,
+)
+
+
+URL_CANDIDATE_RE = re.compile(r"(?:[a-zA-Z][a-zA-Z0-9+.-]*://|mailto:)[^\s<>'\"`]+")
+TOKEN_RE = re.compile(r"\S+")
+LEFT_DELIMITERS = "([{<\"'`"
+RIGHT_DELIMITERS = ")]}>\"'`,;!?"
+
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    text: str
+    key: tuple[object, ...]
+    line_index: int
+    column_index: int
+
+
+def default_fallback_mode() -> str:
+    return os.environ.get("TMUX_OPENER_FALLBACK") or "auto"
+
+
+def default_fallback_command() -> str | None:
+    return os.environ.get("TMUX_OPENER_FALLBACK_COMMAND") or None
+
+
+def default_bridge_policy() -> str:
+    return os.environ.get("TMUX_OPENER_BRIDGE_POLICY") or "always"
+
+
+def default_route_feedback() -> str:
+    return os.environ.get("TMUX_OPENER_ROUTE_FEEDBACK") or "auto"
+
+
+def tmux_message(message: str) -> None:
+    if os.environ.get("TMUX") and shutil.which("tmux"):
+        subprocess.run(["tmux", "display-message", f"tmux-opener: {message}"], check=False)
+        return
+
+    print(f"tmux-opener: {message}", file=sys.stderr)
+
+
+def clean_candidate(text: str) -> str:
+    text = text.strip()
+    while text and text[0] in LEFT_DELIMITERS:
+        text = text[1:]
+    while text and text[-1] in RIGHT_DELIMITERS:
+        text = text[:-1]
+    if text.endswith(":"):
+        text = text[:-1]
+    if text.endswith(".") and not text.endswith(".."):
+        text = text[:-1]
+    return clean_selection(text)
+
+
+def request_key(candidate: str, cwd: str) -> tuple[object, ...] | None:
+    request = build_request(candidate, cwd, None)
+    if request is None:
+        return None
+    if request.get("action") == "open_url":
+        return ("url", request.get("url"))
+    if request.get("action") == "open_vscode_remote":
+        return (
+            "path",
+            request.get("path"),
+            request.get("target_type"),
+            request.get("line"),
+            request.get("column"),
+        )
+    return None
+
+
+def raw_candidates(line: str) -> list[tuple[str, int]]:
+    candidates: list[tuple[str, int]] = []
+    candidates.extend((match.group(0), match.start()) for match in URL_CANDIDATE_RE.finditer(line))
+    candidates.extend((match.group(0), match.start()) for match in TOKEN_RE.finditer(line))
+    return candidates
+
+
+def extract_candidates(text: str, cwd: str) -> list[str]:
+    by_key: dict[tuple[object, ...], Candidate] = {}
+
+    for line_index, line in enumerate(text.splitlines()):
+        for raw_text, column_index in raw_candidates(line):
+            candidate_text = clean_candidate(raw_text)
+            if not candidate_text:
+                continue
+
+            key = request_key(candidate_text, cwd)
+            if key is None:
+                continue
+
+            current = by_key.get(key)
+            candidate = Candidate(candidate_text, key, line_index, column_index)
+            if current is None or (candidate.line_index, candidate.column_index) >= (
+                current.line_index,
+                current.column_index,
+            ):
+                by_key[key] = candidate
+
+    ranked = sorted(by_key.values(), key=lambda candidate: (-candidate.line_index, candidate.column_index))
+    return [candidate.text for candidate in ranked]
+
+
+def capture_pane_text(args: argparse.Namespace) -> str | None:
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        tmux_message("tmux is required to capture pane text")
+        return None
+
+    command = [tmux, "capture-pane", "-p", "-J"]
+    if args.target_pane:
+        command.extend(["-t", args.target_pane])
+    if args.history_lines is not None:
+        command.extend(["-S", f"-{max(args.history_lines, 0)}"])
+
+    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode:
+        error = result.stderr.strip() or f"tmux capture-pane exited with {result.returncode}"
+        tmux_message(error)
+        return None
+    return result.stdout
+
+
+def read_source_text(args: argparse.Namespace) -> str | None:
+    if args.capture_pane:
+        return capture_pane_text(args)
+    if args.stdin or not sys.stdin.isatty():
+        return sys.stdin.read()
+    return capture_pane_text(args)
+
+
+def pick_with_fzf(candidates: list[str], args: argparse.Namespace) -> tuple[str | None, int]:
+    fzf = shutil.which("fzf")
+    if fzf is None:
+        tmux_message("fzf is not installed; install fzf or use --print-candidates")
+        return None, 127
+
+    command = [
+        fzf,
+        "--no-sort",
+        "--prompt",
+        args.prompt,
+        "--height",
+        args.fzf_height,
+        "--reverse",
+    ]
+    result = subprocess.run(
+        command,
+        input="\n".join(candidates) + "\n",
+        text=True,
+        stdout=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode:
+        return None, result.returncode
+
+    selection = result.stdout.splitlines()[0] if result.stdout.splitlines() else ""
+    if not selection:
+        return None, 1
+    return selection, 0
+
+
+def dispatch_selection(selection: str, args: argparse.Namespace) -> int:
+    dispatch_script = Path(__file__).resolve().with_name("tmux-opener-dispatch")
+    command = [
+        str(dispatch_script),
+        selection,
+        "--socket",
+        args.socket,
+        "--cwd",
+        args.cwd,
+        "--timeout",
+        str(args.timeout),
+        "--fallback",
+        args.fallback,
+        "--bridge-policy",
+        args.bridge_policy,
+        "--route-feedback",
+        args.route_feedback,
+        "--log",
+        args.log,
+    ]
+    if args.ssh_host:
+        command.extend(["--ssh-host", args.ssh_host])
+    if args.fallback_command:
+        command.extend(["--fallback-command", args.fallback_command])
+    if args.no_log:
+        command.append("--no-log")
+
+    return subprocess.run(command, check=False).returncode
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--capture-pane", action="store_true", help="capture the tmux pane instead of reading stdin")
+    source.add_argument("--stdin", action="store_true", help="read candidate source text from stdin")
+
+    parser.add_argument("--target-pane", default=os.environ.get("TMUX_PANE"), help="tmux pane target for capture-pane")
+    parser.add_argument(
+        "--history-lines",
+        type=int,
+        default=None,
+        help="include this many scrollback lines before the visible pane",
+    )
+    parser.add_argument(
+        "--print-candidates",
+        "--no-fzf",
+        action="store_true",
+        dest="print_candidates",
+        help="print ranked candidates and exit without running fzf or dispatch",
+    )
+    parser.add_argument("--prompt", default="open> ", help="fzf prompt")
+    parser.add_argument("--fzf-height", default="40%", help="fzf --height value")
+
+    parser.add_argument("--socket", default=default_socket_path(), help="remote forwarded Unix socket path")
+    parser.add_argument("--cwd", default=os.environ.get("TMUX_OPENER_CWD") or os.getcwd())
+    parser.add_argument("--ssh-host", default=default_ssh_host())
+    parser.add_argument("--timeout", type=float, default=0.75)
+    parser.add_argument("--fallback", choices=("auto", "local", "command", "none"), default=default_fallback_mode())
+    parser.add_argument("--fallback-command", default=default_fallback_command())
+    parser.add_argument(
+        "--bridge-policy",
+        choices=("always", "local", "ssh-client-only"),
+        default=default_bridge_policy(),
+    )
+    parser.add_argument(
+        "--route-feedback",
+        choices=("auto", "always", "never"),
+        default=default_route_feedback(),
+    )
+    parser.add_argument("--log", default=default_log_path(), help="remote sender log path")
+    parser.add_argument("--no-log", action="store_true", help="disable remote sender logging")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+
+    source_text = read_source_text(args)
+    if source_text is None:
+        return 1
+
+    candidates = extract_candidates(source_text, args.cwd)
+    if args.print_candidates:
+        for candidate in candidates:
+            print(candidate)
+        return 0
+
+    if not candidates:
+        tmux_message("no opener targets found")
+        return 1
+
+    selection, returncode = pick_with_fzf(candidates, args)
+    if selection is None:
+        return returncode
+
+    return dispatch_selection(selection, args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

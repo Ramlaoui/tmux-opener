@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+
+from tmux_opener_common import build_request  # noqa: E402
+
+
+def touch(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
+def build(selection: str, cwd: Path) -> dict[str, object] | None:
+    return build_request(selection, str(cwd), "devbox")
+
+
+def test_url_fragment_is_preserved_when_wrapped(tmp_path: Path) -> None:
+    request = build("(https://example.test/docs#install)", tmp_path)
+
+    assert request == {
+        "version": 1,
+        "action": "open_url",
+        "url": "https://example.test/docs#install",
+    }
+
+
+def test_python_traceback_uses_innermost_frame(tmp_path: Path) -> None:
+    outer = touch(tmp_path / "app.py")
+    inner = touch(tmp_path / "src" / "worker.py")
+
+    request = build(
+        f"""Traceback (most recent call last):
+  File "{outer}", line 3, in <module>
+    run()
+  File "{inner}", line 17, in run
+    raise RuntimeError("boom")
+RuntimeError: boom
+""",
+        tmp_path,
+    )
+
+    assert request is not None
+    assert request["path"] == str(inner)
+    assert request["target_type"] == "file"
+    assert request["line"] == 17
+
+
+def test_pytest_failure_nodeid_resolves_relative_to_cwd(tmp_path: Path) -> None:
+    test_file = touch(tmp_path / "tests" / "test_widget.py")
+
+    request = build("FAILED tests/test_widget.py::test_renders - AssertionError", tmp_path)
+
+    assert request is not None
+    assert request["path"] == str(test_file)
+    assert "line" not in request
+    assert "column" not in request
+
+
+def test_compiler_style_line_column_strips_wrapping_punctuation(tmp_path: Path) -> None:
+    source = touch(tmp_path / "src" / "main.c")
+
+    request = build("(src/main.c:12:4): error: expected ';'", tmp_path)
+
+    assert request is not None
+    assert request["path"] == str(source)
+    assert request["line"] == 12
+    assert request["column"] == 4
+
+
+def test_quoted_path_with_spaces_and_line(tmp_path: Path) -> None:
+    source = touch(tmp_path / "src" / "quoted file.py")
+
+    request = build('"src/quoted file.py:5"', tmp_path)
+
+    assert request is not None
+    assert request["path"] == str(source)
+    assert request["line"] == 5
+
+
+def test_existing_relative_filename_without_slash_can_have_line(tmp_path: Path) -> None:
+    source = touch(tmp_path / "Makefile")
+
+    request = build("Makefile:9", tmp_path)
+
+    assert request is not None
+    assert request["path"] == str(source)
+    assert request["line"] == 9
+
+
+def test_folder_target_type_is_preserved(tmp_path: Path) -> None:
+    folder = tmp_path / "src"
+    folder.mkdir()
+
+    request = build("src", tmp_path)
+
+    assert request is not None
+    assert request["path"] == str(folder)
+    assert request["target_type"] == "folder"
+
+
+def test_random_text_is_not_treated_as_a_path(tmp_path: Path) -> None:
+    assert build("this failed at line 12 but no file here", tmp_path) is None
+    assert build("not_a_real_file.py", tmp_path) is None

@@ -1,0 +1,778 @@
+#!/usr/bin/env python3
+"""tmux-opener command-line entrypoint."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CLIENT = REPO_ROOT / "bin" / "tmux-opener-client"
+
+
+def default_state_dir() -> Path:
+    return Path.home() / ".local" / "state" / "tmux-opener"
+
+
+def default_ssh_config() -> Path:
+    return Path.home() / ".ssh" / "config"
+
+
+def default_snippet_dir() -> Path:
+    return Path.home() / ".ssh" / "tmux-opener.d"
+
+
+def shell_quote(value: str | Path) -> str:
+    return shlex.quote(str(value))
+
+
+def host_socket_path(host: str, state_dir: Path) -> Path:
+    return state_dir / f"{host}.sock"
+
+
+def local_socket_path(args: argparse.Namespace, host: str) -> Path:
+    state_dir = Path(args.state_dir).expanduser()
+    if getattr(args, "socket", None):
+        return Path(args.socket).expanduser()
+    return host_socket_path(host, state_dir)
+
+
+def infer_host(args: argparse.Namespace) -> str:
+    host = getattr(args, "host", None)
+    if host:
+        return host
+
+    state_dir = Path(args.state_dir).expanduser()
+    snippet_dir = Path(args.snippet_dir).expanduser()
+    candidates: set[str] = set()
+
+    socket_arg = getattr(args, "socket", None)
+    if socket_arg:
+        socket_path = Path(socket_arg).expanduser()
+        if socket_path.suffix == ".sock" and socket_path.stem and socket_path.stem != "opener":
+            candidates.add(socket_path.stem)
+
+    try:
+        candidates.update(path.stem for path in snippet_dir.glob("*.conf") if path.stem)
+    except OSError:
+        pass
+
+    try:
+        candidates.update(path.stem for path in state_dir.glob("*.sock") if path.stem and path.stem != "opener")
+    except OSError:
+        pass
+
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if candidates:
+        raise SystemExit("tmux-opener: HOST is required; candidates: " + ", ".join(sorted(candidates)))
+    raise SystemExit("tmux-opener: HOST is required")
+
+
+def remote_socket_path(user: str | None = None) -> str:
+    if user:
+        return f"/tmp/tmux-opener-{user}.sock"
+    return "/tmp/tmux-opener-%r.sock"
+
+
+def ssh_query(host: str, config_path: Path | None = None) -> dict[str, list[str]]:
+    command = ["ssh", "-G"]
+    if config_path is not None and config_path.exists():
+        command.extend(["-F", str(config_path)])
+    command.append(host)
+
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.strip() or f"ssh -G {host} failed")
+
+    values: dict[str, list[str]] = {}
+    for line in result.stdout.splitlines():
+        if not line or " " not in line:
+            continue
+        key, value = line.split(None, 1)
+        values.setdefault(key.lower(), []).append(value)
+    return values
+
+
+def ssh_user(host: str, config_path: Path | None = None) -> str:
+    values = ssh_query(host, config_path)
+    return values.get("user", [os.environ.get("USER") or "user"])[0]
+
+
+def has_remote_forward(host: str, config_path: Path) -> bool:
+    values = ssh_query(host, config_path)
+    return bool(values.get("remoteforward"))
+
+
+def include_line(snippet_dir: Path) -> str:
+    return f"Include {snippet_dir}/*.conf"
+
+
+def ensure_ssh_include(config_path: Path, snippet_dir: Path, dry_run: bool) -> None:
+    line = include_line(snippet_dir)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing = config_path.read_text() if config_path.exists() else ""
+    if line in existing.splitlines():
+        return
+
+    new_text = f"{line}\n"
+    if existing:
+        new_text += existing if existing.startswith("\n") else f"\n{existing}"
+
+    if dry_run:
+        print(f"would prepend to {config_path}:")
+        print(f"  {line}")
+        return
+
+    if config_path.exists():
+        backup = config_path.with_suffix(config_path.suffix + f".bak.{int(time.time())}")
+        backup.write_text(existing)
+        os.chmod(backup, 0o600)
+
+    config_path.write_text(new_text)
+    os.chmod(config_path, 0o600)
+
+
+def remove_ssh_include_if_unused(
+    config_path: Path,
+    snippet_dir: Path,
+    dry_run: bool,
+    ignore_snippet: Path | None = None,
+) -> None:
+    line = include_line(snippet_dir)
+    if not config_path.exists():
+        return
+
+    try:
+        snippets = list(snippet_dir.glob("*.conf"))
+    except OSError:
+        snippets = [Path("__unknown__")]
+    if ignore_snippet is not None:
+        snippets = [path for path in snippets if path != ignore_snippet]
+    if snippets:
+        return
+
+    existing = config_path.read_text()
+    lines = existing.splitlines(keepends=True)
+    kept_lines = [existing_line for existing_line in lines if existing_line.rstrip("\n") != line]
+    if kept_lines == lines:
+        return
+
+    if dry_run:
+        print(f"would remove from {config_path}:")
+        print(f"  {line}")
+        return
+
+    backup = config_path.with_suffix(config_path.suffix + f".bak.{int(time.time())}")
+    backup.write_text(existing)
+    os.chmod(backup, 0o600)
+    config_path.write_text("".join(kept_lines))
+    os.chmod(config_path, 0o600)
+
+
+def host_snippet(host: str, local_socket: Path) -> str:
+    return "\n".join(
+        [
+            f"# Managed by tmux-opener for {host}.",
+            f"Host {host}",
+            f"  RemoteForward {remote_socket_path()} {local_socket}",
+            "  StreamLocalBindUnlink yes",
+            "  ExitOnForwardFailure yes",
+            "",
+        ]
+    )
+
+
+def host_snippet_path(host: str, snippet_dir: Path) -> Path:
+    return snippet_dir / f"{host}.conf"
+
+
+def managed_snippet_matches(host: str, local_socket: Path, snippet_dir: Path) -> bool:
+    path = host_snippet_path(host, snippet_dir)
+    return path.exists() and path.read_text() == host_snippet(host, local_socket)
+
+
+def ensure_host_snippet(host: str, local_socket: Path, snippet_dir: Path, dry_run: bool) -> None:
+    snippet_dir.mkdir(parents=True, exist_ok=True)
+    path = host_snippet_path(host, snippet_dir)
+    content = host_snippet(host, local_socket)
+
+    if path.exists() and path.read_text() == content:
+        return
+
+    if dry_run:
+        print(f"would write {path}:")
+        print(content, end="")
+        return
+
+    path.write_text(content)
+    os.chmod(path, 0o600)
+
+
+def install_host(args: argparse.Namespace) -> Path:
+    local_socket = local_socket_path(args, args.host)
+    snippet_dir = Path(args.snippet_dir).expanduser()
+    config_path = Path(args.ssh_config).expanduser()
+
+    if (
+        has_remote_forward(args.host, config_path)
+        and not args.force
+        and not managed_snippet_matches(args.host, local_socket, snippet_dir)
+    ):
+        print(
+            f"tmux-opener: {args.host} already has RemoteForward configured; "
+            "use --force to also install tmux-opener's managed forward",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    ensure_ssh_include(config_path, snippet_dir, args.dry_run)
+    ensure_host_snippet(args.host, local_socket, snippet_dir, args.dry_run)
+    return local_socket
+
+
+def uninstall_host(args: argparse.Namespace) -> None:
+    snippet_dir = Path(args.snippet_dir).expanduser()
+    config_path = Path(args.ssh_config).expanduser()
+    path = host_snippet_path(args.host, snippet_dir)
+
+    if path.exists():
+        if args.dry_run:
+            print(f"would remove {path}")
+            remove_ssh_include_if_unused(config_path, snippet_dir, args.dry_run, ignore_snippet=path)
+            return
+        else:
+            path.unlink()
+    elif not args.quiet:
+        print(f"tmux-opener: no managed snippet found for {args.host} at {path}", file=sys.stderr)
+
+    remove_ssh_include_if_unused(config_path, snippet_dir, args.dry_run)
+
+
+def ping_client(socket_path: Path, timeout: float = 0.2) -> bool:
+    response, _error = client_ping_response(socket_path, timeout)
+    return bool(response and response.get("ok"))
+
+
+def client_ping_response(socket_path: Path, timeout: float = 0.2) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(socket_path))
+            client.sendall(b'{"version":1,"action":"ping"}\n')
+            response = client.recv(65536)
+    except OSError as exc:
+        return None, str(exc)
+
+    try:
+        parsed = json.loads(response.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return None, f"invalid response: {exc}"
+    if not isinstance(parsed, dict):
+        return None, "invalid response: not a JSON object"
+    return parsed, None
+
+
+def client_command(
+    host: str,
+    socket_path: Path,
+    client_verbose: bool = False,
+    vscode_folder_window: str = "new",
+    vscode_file_window: str = "reuse",
+) -> list[str]:
+    command = [
+        str(CLIENT),
+        "--socket",
+        str(socket_path),
+        "--default-ssh-host",
+        host,
+        "--allow-ssh-host",
+        host,
+        "--vscode-folder-window",
+        vscode_folder_window,
+        "--vscode-file-window",
+        vscode_file_window,
+    ]
+    if client_verbose:
+        command.append("--verbose")
+    return command
+
+
+def start_client(
+    host: str,
+    socket_path: Path,
+    client_verbose: bool = False,
+    dry_run: bool = False,
+    vscode_folder_window: str = "new",
+    vscode_file_window: str = "reuse",
+) -> None:
+    log_path = socket_path.with_suffix(".log")
+    command = client_command(host, socket_path, client_verbose, vscode_folder_window, vscode_file_window)
+
+    if dry_run:
+        print("would start local client:")
+        print("  " + " ".join(shell_quote(part) for part in command))
+        print(f"would log to: {log_path}")
+        return
+
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
+    log = log_path.open("ab")
+    try:
+        subprocess.Popen(
+            command,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    finally:
+        log.close()
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if ping_client(socket_path):
+            return
+        time.sleep(0.05)
+
+    raise SystemExit(f"tmux-opener: local client did not start; see {log_path}")
+
+
+def ensure_client(args: argparse.Namespace, socket_path: Path) -> None:
+    if args.no_start_client or args.dry_run:
+        return
+
+    if ping_client(socket_path):
+        return
+
+    try:
+        socket_path.unlink()
+    except FileNotFoundError:
+        pass
+
+    start_client(
+        args.host,
+        socket_path,
+        args.client_verbose,
+        vscode_folder_window=args.vscode_folder_window,
+        vscode_file_window=args.vscode_file_window,
+    )
+
+
+def socket_owner_pids_linux(socket_path: Path) -> list[int]:
+    proc_net_unix = Path("/proc/net/unix")
+    if not proc_net_unix.exists():
+        return []
+
+    inodes: set[str] = set()
+    socket_name = str(socket_path)
+    try:
+        for line in proc_net_unix.read_text().splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 8 and fields[7] == socket_name:
+                inodes.add(fields[6])
+    except OSError:
+        return []
+
+    if not inodes:
+        return []
+
+    pids: set[int] = set()
+    proc = Path("/proc")
+    for fd_dir in proc.glob("[0-9]*/fd"):
+        try:
+            pid = int(fd_dir.parent.name)
+        except ValueError:
+            continue
+        if pid == os.getpid():
+            continue
+        try:
+            fds = list(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if target.startswith("socket:[") and target[8:-1] in inodes:
+                pids.add(pid)
+                break
+    return sorted(pids)
+
+
+def socket_owner_pids_lsof(socket_path: Path) -> list[int]:
+    lsof = shutil.which("lsof")
+    if lsof is None:
+        return []
+
+    result = subprocess.run(
+        [lsof, "-t", "-U", str(socket_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if result.returncode not in (0, 1):
+        return []
+
+    pids: set[int] = set()
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid != os.getpid():
+            pids.add(pid)
+    return sorted(pids)
+
+
+def socket_owner_pids(socket_path: Path) -> list[int]:
+    return socket_owner_pids_linux(socket_path) or socket_owner_pids_lsof(socket_path)
+
+
+def stop_client(socket_path: Path, dry_run: bool) -> None:
+    if not ping_client(socket_path):
+        if socket_path.exists():
+            if dry_run:
+                print(f"would remove stale local socket: {socket_path}")
+            else:
+                socket_path.unlink()
+        elif dry_run:
+            print(f"local client already stopped: {socket_path}")
+        return
+
+    pids = socket_owner_pids(socket_path)
+    if not pids:
+        raise SystemExit(
+            f"tmux-opener: local client answered on {socket_path}, "
+            "but its owner process could not be identified; refusing broad kill"
+        )
+
+    if dry_run:
+        print(f"would stop local client pid(s): {', '.join(str(pid) for pid in pids)}")
+        return
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        if not ping_client(socket_path):
+            try:
+                socket_path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        time.sleep(0.05)
+
+    raise SystemExit(f"tmux-opener: local client did not stop for {socket_path}")
+
+
+def restart_client(args: argparse.Namespace) -> None:
+    host = infer_host(args)
+    socket_path = local_socket_path(args, host)
+    stop_client(socket_path, args.dry_run)
+    start_client(
+        host,
+        socket_path,
+        args.client_verbose,
+        args.dry_run,
+        args.vscode_folder_window,
+        args.vscode_file_window,
+    )
+
+
+def read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text() if path.exists() else ""
+    except OSError:
+        return ""
+
+
+def ssh_query_or_error(host: str, config_path: Path) -> tuple[dict[str, list[str]], str | None]:
+    try:
+        return ssh_query(host, config_path), None
+    except SystemExit as exc:
+        return {}, str(exc)
+
+
+def managed_include_present(config_path: Path, snippet_dir: Path) -> bool:
+    return include_line(snippet_dir) in read_text_if_exists(config_path).splitlines()
+
+
+def managed_snippet_status(host: str, local_socket: Path, snippet_dir: Path) -> tuple[str, Path]:
+    path = host_snippet_path(host, snippet_dir)
+    if not path.exists():
+        return "missing", path
+    if managed_snippet_matches(host, local_socket, snippet_dir):
+        return "ok", path
+    return "differs", path
+
+
+def has_expected_remote_forward(values: dict[str, list[str]], local_socket: Path) -> bool:
+    user = values.get("user", [None])[0]
+    expected_remotes = {remote_socket_path()}
+    if user:
+        expected_remotes.add(remote_socket_path(user))
+    expected_local = str(local_socket)
+    for value in values.get("remoteforward", []):
+        fields = value.split()
+        if len(fields) >= 2 and fields[0] in expected_remotes and fields[1] == expected_local:
+            return True
+    return False
+
+
+def next_action(
+    host: str,
+    include_present: bool,
+    snippet_status: str,
+    remote_forward_ok: bool,
+    has_any_remote_forward: bool,
+    client_ok: bool,
+    ssh_error: str | None,
+) -> str:
+    if ssh_error:
+        return f"fix local SSH config, then run `ssh -G {host}` again"
+    if has_any_remote_forward and not remote_forward_ok:
+        return f"run `tmux-opener install-host {host} --force` or remove the conflicting RemoteForward"
+    if not include_present or snippet_status != "ok":
+        return f"run `tmux-opener install-host {host}`"
+    if not remote_forward_ok:
+        return f"run `tmux-opener install-host {host}`"
+    if not client_ok:
+        return f"run `tmux-opener restart-client {host}`"
+    return f"connect with `tmux-opener ssh {host}`"
+
+
+def doctor(args: argparse.Namespace) -> None:
+    host = infer_host(args)
+    socket_path = local_socket_path(args, host)
+    config_path = Path(args.ssh_config).expanduser()
+    snippet_dir = Path(args.snippet_dir).expanduser()
+
+    include_present = managed_include_present(config_path, snippet_dir)
+    snippet_status, snippet_path = managed_snippet_status(host, socket_path, snippet_dir)
+    values, ssh_error = ssh_query_or_error(host, config_path)
+    remoteforwards = values.get("remoteforward", [])
+    remote_forward_ok = has_expected_remote_forward(values, socket_path)
+    ping_response, ping_error = client_ping_response(socket_path)
+    client_ok = bool(ping_response and ping_response.get("ok"))
+    user = values.get("user", [None])[0]
+    remote_socket = remote_socket_path(user)
+
+    include_state = "ok" if include_present else "missing"
+    print(f"host: {host}")
+    print(f"ssh config: {config_path}")
+    print(f"managed include: {include_state} ({include_line(snippet_dir)})")
+    print(f"managed snippet: {snippet_status} ({snippet_path})")
+    print("ssh -G remoteforward:")
+    if ssh_error:
+        print(f"  error: {ssh_error}")
+    elif remoteforwards:
+        for value in remoteforwards:
+            print(f"  remoteforward {value}")
+    else:
+        print("  none")
+    print(f"expected local socket: {socket_path}")
+    print(f"local client ping: {'ok' if client_ok else 'failed'}")
+    if ping_response:
+        print(f"local client pid: {ping_response.get('pid', 'unknown')}")
+        print(f"local client default SSH host: {ping_response.get('default_ssh_host') or 'unset'}")
+    elif ping_error:
+        print(f"local client error: {ping_error}")
+    print(f"expected remote socket: {remote_socket}")
+    print(
+        "next: "
+        + next_action(
+            host,
+            include_present,
+            snippet_status,
+            remote_forward_ok,
+            bool(remoteforwards),
+            client_ok,
+            ssh_error,
+        )
+    )
+
+
+def status(args: argparse.Namespace) -> None:
+    host = infer_host(args)
+    socket_path = local_socket_path(args, host)
+    log_path = socket_path.with_suffix(".log")
+    ping_response, ping_error = client_ping_response(socket_path)
+    client_ok = bool(ping_response and ping_response.get("ok"))
+    socket_state = "exists" if socket_path.exists() else "missing"
+
+    print(f"host: {host}")
+    print(f"local socket: {socket_path} ({socket_state})")
+    print(f"client ping: {'ok' if client_ok else 'failed'}")
+    if ping_response:
+        print(f"client pid: {ping_response.get('pid', 'unknown')}")
+        print(f"client default SSH host: {ping_response.get('default_ssh_host') or 'unset'}")
+    elif ping_error:
+        print(f"client error: {ping_error}")
+    print(f"log path: {log_path}")
+    print(f"expected default/allowed SSH host: {host}")
+
+
+def service_unit(host: str, socket_path: Path, vscode_folder_window: str = "new", vscode_file_window: str = "reuse") -> str:
+    command = client_command(
+        host,
+        socket_path,
+        vscode_folder_window=vscode_folder_window,
+        vscode_file_window=vscode_file_window,
+    )
+    return "\n".join(
+        [
+            "[Unit]",
+            f"Description=tmux-opener local client for {host}",
+            "",
+            "[Service]",
+            "Type=simple",
+            "ExecStart=" + " ".join(shell_quote(part) for part in command),
+            "Restart=on-failure",
+            "",
+            "[Install]",
+            "WantedBy=default.target",
+            "",
+        ]
+    )
+
+
+def install_service(args: argparse.Namespace) -> None:
+    if not args.systemd_user:
+        raise SystemExit("tmux-opener: install-service currently requires --systemd-user")
+    if not args.dry_run:
+        raise SystemExit("tmux-opener: install-service is safe by default; pass --dry-run to print the unit")
+
+    host = infer_host(args)
+    socket_path = local_socket_path(args, host)
+    print(f"# user systemd unit for tmux-opener host {host}")
+    print(f"# suggested path: ~/.config/systemd/user/tmux-opener-{host}.service")
+    print(service_unit(host, socket_path, args.vscode_folder_window, args.vscode_file_window), end="")
+
+
+def run_ssh(args: argparse.Namespace) -> int:
+    local_socket = install_host(args)
+    ensure_client(args, local_socket)
+
+    command = ["ssh"]
+    config_path = Path(args.ssh_config).expanduser()
+    if config_path != default_ssh_config():
+        command.extend(["-F", str(config_path)])
+    command.extend([args.host, *args.ssh_args])
+    if args.dry_run:
+        print("would run:")
+        print("  " + " ".join(shell_quote(part) for part in command))
+        return 0
+
+    os.execvp(command[0], command)
+    return 127
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    install = subcommands.add_parser("install-host", help="install managed SSH forwarding for a host")
+    install.add_argument("host")
+    install.add_argument("--socket")
+    install.add_argument("--state-dir", default=default_state_dir())
+    install.add_argument("--ssh-config", default=default_ssh_config())
+    install.add_argument("--snippet-dir", default=default_snippet_dir())
+    install.add_argument("--dry-run", action="store_true")
+    install.add_argument("--force", action="store_true")
+    install.set_defaults(func=install_host)
+
+    uninstall = subcommands.add_parser("uninstall-host", help="remove managed SSH forwarding for a host")
+    uninstall.add_argument("host")
+    uninstall.add_argument("--ssh-config", default=default_ssh_config())
+    uninstall.add_argument("--snippet-dir", default=default_snippet_dir())
+    uninstall.add_argument("--dry-run", action="store_true")
+    uninstall.add_argument("--quiet", action="store_true")
+    uninstall.set_defaults(func=uninstall_host)
+
+    ssh = subcommands.add_parser("ssh", help="install bridge config, ensure client, then exec ssh")
+    ssh.add_argument("host")
+    ssh.add_argument("ssh_args", nargs=argparse.REMAINDER)
+    ssh.add_argument("--socket")
+    ssh.add_argument("--state-dir", default=default_state_dir())
+    ssh.add_argument("--ssh-config", default=default_ssh_config())
+    ssh.add_argument("--snippet-dir", default=default_snippet_dir())
+    ssh.add_argument("--dry-run", action="store_true")
+    ssh.add_argument("--force", action="store_true")
+    ssh.add_argument("--no-start-client", action="store_true")
+    ssh.add_argument("--client-verbose", action="store_true", help="start the local client with full request-payload logging")
+    ssh.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
+    ssh.add_argument("--vscode-file-window", choices=("new", "reuse"), default="reuse")
+    ssh.set_defaults(func=run_ssh)
+
+    doctor_parser = subcommands.add_parser("doctor", help="show local lifecycle diagnostics for a host")
+    doctor_parser.add_argument("host", nargs="?")
+    doctor_parser.add_argument("--socket")
+    doctor_parser.add_argument("--state-dir", default=default_state_dir())
+    doctor_parser.add_argument("--ssh-config", default=default_ssh_config())
+    doctor_parser.add_argument("--snippet-dir", default=default_snippet_dir())
+    doctor_parser.set_defaults(func=doctor)
+
+    status_parser = subcommands.add_parser("status", help="show terse local client status for a host")
+    status_parser.add_argument("host", nargs="?")
+    status_parser.add_argument("--socket")
+    status_parser.add_argument("--state-dir", default=default_state_dir())
+    status_parser.add_argument("--snippet-dir", default=default_snippet_dir())
+    status_parser.set_defaults(func=status)
+
+    restart = subcommands.add_parser("restart-client", help="replace the local client for a host socket")
+    restart.add_argument("host", nargs="?")
+    restart.add_argument("--socket")
+    restart.add_argument("--state-dir", default=default_state_dir())
+    restart.add_argument("--snippet-dir", default=default_snippet_dir())
+    restart.add_argument("--dry-run", action="store_true")
+    restart.add_argument("--client-verbose", action="store_true", help="start the local client with full request-payload logging")
+    restart.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
+    restart.add_argument("--vscode-file-window", choices=("new", "reuse"), default="reuse")
+    restart.set_defaults(func=restart_client)
+
+    service = subcommands.add_parser("install-service", help="print a local client service unit")
+    service.add_argument("host", nargs="?")
+    service.add_argument("--socket")
+    service.add_argument("--state-dir", default=default_state_dir())
+    service.add_argument("--snippet-dir", default=default_snippet_dir())
+    service.add_argument("--systemd-user", action="store_true")
+    service.add_argument("--dry-run", action="store_true")
+    service.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
+    service.add_argument("--vscode-file-window", choices=("new", "reuse"), default="reuse")
+    service.set_defaults(func=install_service)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    result = args.func(args)
+    return 0 if result is None or isinstance(result, Path) else int(result)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
