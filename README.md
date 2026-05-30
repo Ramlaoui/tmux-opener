@@ -10,7 +10,6 @@ local desktop browser or VS Code Remote-SSH.
 - [Install](#install)
 - [Connect And Use](#connect-and-use)
 - [Configuration](#configuration)
-- [Trust Model](#trust-model)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 
@@ -123,31 +122,17 @@ Common tmux options:
 ```tmux
 set -g @tmux_opener_key 'o'
 set -g @tmux_opener_picker_key 'o'
-set -g @tmux_opener_fallback 'auto'
+set -g @tmux_opener_fallback 'auto' # or local, command, none
 ```
 
-Supported `@tmux_opener_fallback` values are `auto`, `local`, `command`, and
-`none`. Set `@tmux_opener_fallback_command` only when you intentionally want to
-delegate no-bridge selections to a custom command.
 
 The copy-mode key does not try to infer whether the pane is SSH. It pings the
 forwarded socket; a successful ping means bridge path, and a failed ping means
 fallback path.
 
-## Trust Model
-
-The Local Opener Client only accepts structured Open Requests. It does not
-execute shell commands sent by the remote host.
-
-By default, remote file/editor requests are rejected unless the local client was
-started with an allowed SSH host:
-
 ```sh
 tmux-opener-client --allow-ssh-host HOST
 ```
-
-URLs are restricted to `http` and `https` by default. Add `--allow-url-scheme`
-only for schemes you intentionally want the local desktop to handle.
 
 ## Troubleshooting
 
