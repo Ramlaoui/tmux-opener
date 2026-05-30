@@ -486,6 +486,19 @@ def stop_client(socket_path: Path, dry_run: bool) -> None:
         except ProcessLookupError:
             pass
         except PermissionError as exc:
+            if socket_path.exists():
+                try:
+                    socket_path.unlink()
+                except OSError as unlink_exc:
+                    raise SystemExit(
+                        f"tmux-opener: permission denied stopping local client pid {pid} "
+                        f"for {socket_path}: {exc}; also failed to replace socket path: {unlink_exc}"
+                    ) from unlink_exc
+                print(
+                    f"warning: permission denied stopping local client pid {pid}; "
+                    f"replaced socket path {socket_path}"
+                )
+                return
             raise SystemExit(
                 f"tmux-opener: permission denied stopping local client pid {pid} "
                 f"for {socket_path}: {exc}"

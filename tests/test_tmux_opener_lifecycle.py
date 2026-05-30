@@ -181,7 +181,31 @@ def test_stop_client_prefers_ping_pid_over_lsof(monkeypatch: Any, tmp_path: Path
     assert killed == [(12345, tmux_opener["signal"].SIGTERM)]
 
 
-def test_stop_client_reports_permission_error_without_traceback(monkeypatch: Any, tmp_path: Path) -> None:
+def test_stop_client_replaces_socket_when_pid_cannot_be_signalled(monkeypatch: Any, tmp_path: Path) -> None:
+    tmux_opener = runpy.run_path(str(TMUX_OPENER))
+    socket_path = tmp_path / "work.sock"
+    socket_path.touch()
+
+    monkeypatch.setitem(
+        tmux_opener["client_ping_response"].__globals__,
+        "client_ping_response",
+        lambda _socket_path: ({"ok": True, "pid": 12345}, None),
+    )
+
+    def deny(_pid: int, _sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setitem(tmux_opener["os"].__dict__, "kill", deny)
+
+    tmux_opener["stop_client"](socket_path, dry_run=False)
+
+    assert not socket_path.exists()
+
+
+def test_stop_client_reports_permission_error_when_socket_cannot_be_replaced(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
     tmux_opener = runpy.run_path(str(TMUX_OPENER))
     socket_path = tmp_path / "work.sock"
 
