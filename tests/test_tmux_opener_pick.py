@@ -51,3 +51,9 @@ def test_no_fzf_alias_prints_candidates_without_requiring_fzf() -> None:
     )
 
     assert result.stdout.strip() == "./scripts/tmux-opener-send:1"
+
+
+def test_print_candidates_includes_remote_localhost_url() -> None:
+    result = run_picker("dev server http://localhost:8080\n")
+
+    assert result.stdout.strip() == "http://localhost:8080"
