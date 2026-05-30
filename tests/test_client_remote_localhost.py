@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import runpy
 from argparse import Namespace
 from pathlib import Path
@@ -67,7 +68,7 @@ def test_remote_localhost_dry_run_starts_tunnel_and_opens_rewritten_url(
 
     output = capsys.readouterr().out
     assert (
-        f"dry-run tunnel: {FAKE_SSH} -N -S none -o ExitOnForwardFailure=yes "
+        f"dry-run tunnel: {FAKE_SSH} -N -S none -o ExitOnForwardFailure=no "
         "-o ForkAfterAuthentication=no "
         "-L 127.0.0.1:18080:localhost:8080 devbox"
     ) in output
@@ -90,6 +91,37 @@ def test_remote_localhost_uses_first_free_port_when_preferred_is_taken(
     output = capsys.readouterr().out
     assert "-L 127.0.0.1:18000:localhost:8080 devbox" in output
     assert f"dry-run: {FAKE_OPENER} 'http://127.0.0.1:18000/docs?token=abc#install'" in output
+
+
+def test_remote_localhost_rejects_tunnel_that_never_listens(monkeypatch: Any) -> None:
+    client = load_client(monkeypatch)
+
+    class FakeProcess:
+        terminated = False
+
+        def poll(self) -> None:
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: float | None = None) -> int:
+            return 0
+
+        def kill(self) -> None:
+            pass
+
+    process = FakeProcess()
+    stderr_log = io.BytesIO(b"remote forward already exists")
+    monkeypatch.setattr(client["subprocess"], "Popen", lambda *_args, **_kwargs: process)
+    monkeypatch.setattr(client["tempfile"], "TemporaryFile", lambda: stderr_log)
+    monkeypatch.setitem(client["ensure_remote_localhost_forward"].__globals__, "localhost_port_ready", lambda _port: False)
+    monkeypatch.setitem(client["ensure_remote_localhost_forward"].__globals__, "LOCALHOST_FORWARD_STARTUP_TIMEOUT", 0)
+
+    with pytest.raises(client["RequestError"], match="localhost forward did not listen"):
+        client["open_remote_localhost"](request(), {"devbox"}, args(dry_run=False))
+
+    assert process.terminated
 
 
 def test_remote_localhost_rejects_unallowed_ssh_host(monkeypatch: Any) -> None:
