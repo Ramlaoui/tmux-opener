@@ -447,8 +447,18 @@ def socket_owner_pids(socket_path: Path) -> list[int]:
     return socket_owner_pids_linux(socket_path) or socket_owner_pids_lsof(socket_path)
 
 
+def client_pid_from_ping_response(response: dict[str, object] | None) -> int | None:
+    if not response:
+        return None
+    pid = response.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
+        return None
+    return pid
+
+
 def stop_client(socket_path: Path, dry_run: bool) -> None:
-    if not ping_client(socket_path):
+    ping_response, _ping_error = client_ping_response(socket_path)
+    if not bool(ping_response and ping_response.get("ok")):
         if socket_path.exists():
             if dry_run:
                 print(f"would remove stale local socket: {socket_path}")
@@ -458,7 +468,8 @@ def stop_client(socket_path: Path, dry_run: bool) -> None:
             print(f"local client already stopped: {socket_path}")
         return
 
-    pids = socket_owner_pids(socket_path)
+    client_pid = client_pid_from_ping_response(ping_response)
+    pids = [client_pid] if client_pid is not None else socket_owner_pids(socket_path)
     if not pids:
         raise SystemExit(
             f"tmux-opener: local client answered on {socket_path}, "
@@ -474,6 +485,11 @@ def stop_client(socket_path: Path, dry_run: bool) -> None:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except PermissionError as exc:
+            raise SystemExit(
+                f"tmux-opener: permission denied stopping local client pid {pid} "
+                f"for {socket_path}: {exc}"
+            ) from exc
 
     deadline = time.time() + 2.0
     while time.time() < deadline:

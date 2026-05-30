@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -146,3 +148,57 @@ def test_install_service_dry_run_prints_user_systemd_unit(tmp_path: Path) -> Non
     assert "[Service]" in result.stdout
     assert f"--socket {state_dir / 'work.sock'}" in result.stdout
     assert "--default-ssh-host work --allow-ssh-host work" in result.stdout
+
+
+def test_stop_client_prefers_ping_pid_over_lsof(monkeypatch: Any, tmp_path: Path) -> None:
+    tmux_opener = runpy.run_path(str(TMUX_OPENER))
+    socket_path = tmp_path / "work.sock"
+    killed: list[tuple[int, int]] = []
+
+    monkeypatch.setitem(
+        tmux_opener["client_ping_response"].__globals__,
+        "client_ping_response",
+        lambda _socket_path: ({"ok": True, "pid": 12345}, None),
+    )
+    monkeypatch.setitem(
+        tmux_opener["socket_owner_pids"].__globals__,
+        "socket_owner_pids",
+        lambda _socket_path: (_ for _ in ()).throw(AssertionError("lsof fallback should not be used")),
+    )
+    monkeypatch.setitem(
+        tmux_opener["os"].__dict__,
+        "kill",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+    monkeypatch.setitem(
+        tmux_opener["ping_client"].__globals__,
+        "ping_client",
+        lambda _socket_path: False,
+    )
+
+    tmux_opener["stop_client"](socket_path, dry_run=False)
+
+    assert killed == [(12345, tmux_opener["signal"].SIGTERM)]
+
+
+def test_stop_client_reports_permission_error_without_traceback(monkeypatch: Any, tmp_path: Path) -> None:
+    tmux_opener = runpy.run_path(str(TMUX_OPENER))
+    socket_path = tmp_path / "work.sock"
+
+    monkeypatch.setitem(
+        tmux_opener["client_ping_response"].__globals__,
+        "client_ping_response",
+        lambda _socket_path: ({"ok": True, "pid": 12345}, None),
+    )
+
+    def deny(_pid: int, _sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setitem(tmux_opener["os"].__dict__, "kill", deny)
+
+    try:
+        tmux_opener["stop_client"](socket_path, dry_run=False)
+    except SystemExit as exc:
+        assert "permission denied stopping local client pid 12345" in str(exc)
+    else:
+        raise AssertionError("stop_client should exit with an actionable error")
