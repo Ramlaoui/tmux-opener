@@ -110,11 +110,13 @@ tmux-opener-send http://127.0.0.1:8888/lab?token=abc
 The local client starts or reuses an SSH tunnel such as:
 
 ```sh
-ssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:18080:localhost:8080 HOST
+ssh -N -S none -o ExitOnForwardFailure=no -o ForkAfterAuthentication=no \
+  -L 127.0.0.1:18080:localhost:8080 HOST
 ```
 
 and opens the rewritten local URL, for example
-`http://127.0.0.1:18080`.
+`http://127.0.0.1:18080`. The client verifies that the local listener is
+ready before opening the URL.
 
 Remove a managed host snippet with:
 

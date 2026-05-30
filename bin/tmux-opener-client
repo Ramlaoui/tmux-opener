@@ -316,12 +316,7 @@ def stop_remote_localhost_forwards() -> None:
                 f"{forward.ssh_host} {forward.remote_host}:{forward.remote_port} "
                 f"-> 127.0.0.1:{forward.local_port}"
             )
-            forward.process.terminate()
-            try:
-                forward.process.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                forward.process.kill()
-                forward.process.wait(timeout=1.0)
+            terminate_process(forward.process)
         REMOTE_LOCALHOST_FORWARDS.pop(key, None)
 
 
@@ -447,6 +442,8 @@ def ensure_remote_localhost_forward(
         "-N",
         "-S",
         "none",
+        # Host config may already contain the bridge RemoteForward. Keep those
+        # inherited forwards non-fatal and verify our local -L listener below.
         "-o",
         "ExitOnForwardFailure=no",
         "-o",
