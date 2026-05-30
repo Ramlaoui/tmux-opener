@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
@@ -27,6 +28,8 @@ DEFAULT_VSCODE_FOLDER_WINDOW = "new"
 DEFAULT_VSCODE_FILE_WINDOW = "reuse"
 DEFAULT_LOCALHOST_FORWARD_START_PORT = 18000
 DEFAULT_LOCALHOST_FORWARD_END_PORT = 18999
+LOCALHOST_FORWARD_STARTUP_TIMEOUT = 1.0
+PROCESS_STDERR_LOG_LIMIT = 2000
 VSCODE_WINDOW_POLICIES = ("new", "reuse")
 LOCALHOST_SCHEMES = ("http", "https")
 REMOTE_LOCALHOST_HOSTS = ("localhost", "127.0.0.1")
@@ -350,15 +353,54 @@ def allocate_localhost_forward_port(remote_port: int, start_port: int, end_port:
     raise RequestError(f"no free localhost forward port in range {start_port}-{end_port}")
 
 
+def localhost_port_ready(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+            return True
+    except OSError:
+        return False
+
+
+def process_stderr(process: subprocess.Popen[bytes]) -> str:
+    if process.stderr is None:
+        return ""
+    raw = process.stderr.read()
+    if not raw:
+        return ""
+    text = raw.decode("utf-8", errors="replace").strip()
+    if len(text) > PROCESS_STDERR_LOG_LIMIT:
+        return "..." + text[-PROCESS_STDERR_LOG_LIMIT:]
+    return text
+
+
+def stderr_suffix(process: subprocess.Popen[bytes]) -> str:
+    stderr = process_stderr(process)
+    if not stderr:
+        return ""
+    return f"; stderr: {stderr}"
+
+
+def wait_for_localhost_forward_start(process: subprocess.Popen[bytes], local_port: int) -> int | None:
+    deadline = time.monotonic() + LOCALHOST_FORWARD_STARTUP_TIMEOUT
+    while time.monotonic() < deadline:
+        returncode = process.poll()
+        if returncode is not None:
+            return returncode
+        if localhost_port_ready(local_port):
+            return None
+        time.sleep(0.05)
+    return None
+
+
 def watch_localhost_forward(key: tuple[str, str, int], process: subprocess.Popen[bytes], command_display: str) -> None:
     returncode = process.wait()
     current = REMOTE_LOCALHOST_FORWARDS.get(key)
     if current is not None and current.process is process:
         REMOTE_LOCALHOST_FORWARDS.pop(key, None)
     if returncode:
-        log_line(f"localhost forward exited nonzero rc={returncode}: {command_display}")
+        log_line(f"localhost forward exited nonzero rc={returncode}: {command_display}{stderr_suffix(process)}")
     else:
-        log_line(f"localhost forward exited: {command_display}")
+        log_line(f"localhost forward exited: {command_display}{stderr_suffix(process)}")
 
 
 def ensure_remote_localhost_forward(
@@ -384,6 +426,8 @@ def ensure_remote_localhost_forward(
         "-N",
         "-o",
         "ExitOnForwardFailure=yes",
+        "-o",
+        "ForkAfterAuthentication=no",
         "-L",
         f"127.0.0.1:{local_port}:{remote_host}:{remote_port}",
         ssh_host,
@@ -398,11 +442,17 @@ def ensure_remote_localhost_forward(
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
         )
     except OSError as exc:
         raise RequestError(f"failed to launch {command_display}: {exc}") from exc
+
+    returncode = wait_for_localhost_forward_start(process, local_port)
+    if returncode is not None:
+        raise RequestError(
+            f"localhost forward exited immediately rc={returncode}: {command_display}{stderr_suffix(process)}"
+        )
 
     REMOTE_LOCALHOST_FORWARDS[key] = LocalhostForward(
         ssh_host=ssh_host,
