@@ -339,6 +339,8 @@ def build_request(selection: str, cwd: str, ssh_host: str | None) -> dict[str, o
         "path": path,
         "target_type": target_type,
     }
+    if target_type == "file":
+        request["workspace_path"] = str(Path(os.path.expanduser(cwd)).resolve(strict=False))
     if ssh_host:
         request["ssh_host"] = ssh_host
     if line is not None:

@@ -27,7 +27,7 @@ from typing import BinaryIO
 HOST_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
 DEFAULT_URL_SCHEMES = ("http", "https")
 DEFAULT_VSCODE_FOLDER_WINDOW = "new"
-DEFAULT_VSCODE_FILE_WINDOW = "reuse"
+DEFAULT_VSCODE_FILE_WINDOW = "new"
 DEFAULT_LOCALHOST_FORWARD_START_PORT = 18000
 DEFAULT_LOCALHOST_FORWARD_END_PORT = 18999
 LOCALHOST_FORWARD_STARTUP_TIMEOUT = 1.0
@@ -265,6 +265,9 @@ def open_vscode_remote(
     target_type = validate_target_type(request.get("target_type"))
     line = request.get("line")
     column = request.get("column")
+    workspace_path = None
+    if target_type == "file" and request.get("workspace_path") is not None:
+        workspace_path = validate_path(request.get("workspace_path"))
 
     code = shutil.which("code")
     if code:
@@ -283,8 +286,11 @@ def open_vscode_remote(
             *goto_flags,
             "--remote",
             vscode_remote_authority(host),
-            remote_target,
         ]
+        if target_type == "file" and window_policy == "new" and workspace_path:
+            command.extend([workspace_path, remote_target])
+        else:
+            command.append(remote_target)
         launch_command(command, dry_run, verbose, command_label="code")
         return
 
@@ -612,7 +618,7 @@ def main() -> int:
         "--vscode-file-window",
         choices=VSCODE_WINDOW_POLICIES,
         default=DEFAULT_VSCODE_FILE_WINDOW,
-        help="VS Code window policy for remote files (default: reuse)",
+        help="VS Code window policy for remote files (default: new)",
     )
     parser.add_argument(
         "--localhost-forward-start-port",

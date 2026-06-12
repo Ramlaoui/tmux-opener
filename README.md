@@ -131,7 +131,7 @@ Defaults:
 - Prefix target picker key: `o`
 - Remote socket: `/tmp/tmux-opener-$USER.sock`
 - Remote folders open in a new VS Code Remote-SSH window
-- Remote files open in the current VS Code Remote-SSH window
+- Remote files open in a new VS Code Remote-SSH window rooted at the pane cwd
 - Remote `localhost:PORT` URLs open through a local SSH `-L` tunnel
 - Fallback: if the bridge is unavailable, copy-mode uses same-host `open` or
   `xdg-open`

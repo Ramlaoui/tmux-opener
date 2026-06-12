@@ -99,6 +99,7 @@ def test_pytest_failure_nodeid_resolves_relative_to_cwd(tmp_path: Path) -> None:
 
     assert request is not None
     assert request["path"] == str(test_file)
+    assert request["workspace_path"] == str(tmp_path)
     assert "line" not in request
     assert "column" not in request
 
@@ -131,6 +132,7 @@ def test_existing_relative_filename_without_slash_can_have_line(tmp_path: Path) 
 
     assert request is not None
     assert request["path"] == str(source)
+    assert request["workspace_path"] == str(tmp_path)
     assert request["line"] == 9
 
 
