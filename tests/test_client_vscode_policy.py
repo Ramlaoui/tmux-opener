@@ -118,5 +118,5 @@ def test_vscode_remote_window_policies_are_configurable(monkeypatch: Any, capsys
     output = capsys.readouterr().out
     assert (
         f"dry-run code: {FAKE_CODE} --reuse-window --goto --remote "
-        "ssh-remote+devbox /work/project/app.py:12"
+        "ssh-remote+devbox /work/project /work/project/app.py:12"
     ) in output

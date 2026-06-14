@@ -147,6 +147,42 @@ def test_folder_target_type_is_preserved(tmp_path: Path) -> None:
     assert request["target_type"] == "folder"
 
 
+def test_soft_wrapped_path_joined_after_directory_boundary(tmp_path: Path) -> None:
+    target = touch(
+        tmp_path
+        / "entaloracle/src/config/experiments/finetune/uma/from_ssl"
+        / "distill_target_labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml"
+    )
+
+    request = build(
+        "entaloracle/src/config/experiments/finetune/uma/from_ssl/\n"
+        "distill_target_labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml",
+        tmp_path,
+    )
+
+    assert request is not None
+    assert request["path"] == str(target)
+    assert request["target_type"] == "file"
+
+
+def test_soft_wrapped_path_joined_inside_filename(tmp_path: Path) -> None:
+    target = touch(
+        tmp_path
+        / "entaloracle/src/config/experiments/finetune/uma/from_ssl"
+        / "distill_target_labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml"
+    )
+
+    request = build(
+        "entaloracle/src/config/experiments/finetune/uma/from_ssl/distill_target_\n"
+        "labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml",
+        tmp_path,
+    )
+
+    assert request is not None
+    assert request["path"] == str(target)
+    assert request["target_type"] == "file"
+
+
 def test_random_text_is_not_treated_as_a_path(tmp_path: Path) -> None:
     assert build("this failed at line 12 but no file here", tmp_path) is None
     assert build("not_a_real_file.py", tmp_path) is None
