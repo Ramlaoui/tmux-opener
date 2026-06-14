@@ -28,6 +28,7 @@ PYTEST_RESULT_RE = re.compile(r"^\s*(?:FAILED|ERROR)\s+(?P<target>\S+)")
 QUOTED_CANDIDATE_RE = re.compile(r"(?P<quote>[\"'`])(?P<value>.*?)(?P=quote)")
 PATH_LINE_CANDIDATE_RE = re.compile(r"(?P<candidate>\S+?:[1-9][0-9]*(?::[1-9][0-9]*)?:?)")
 TOKEN_RE = re.compile(r"\S+")
+WRAPPED_PATH_FRAGMENT_RE = re.compile(r"^[^\s]+$")
 
 WRAPPER_PAIRS = {
     "(": ")",
@@ -182,6 +183,75 @@ def looks_like_path(text: str) -> bool:
     return "/" in text
 
 
+def path_for_candidate(text: str, cwd: str) -> Path | None:
+    if file_path := parse_file_uri(text):
+        text = file_path
+
+    path_text, _line, _column = split_line_column(text)
+    path_text = path_text.strip()
+    if not path_text or "\n" in path_text or "\r" in path_text:
+        return None
+
+    if not looks_like_path(path_text):
+        return Path(cwd, path_text)
+
+    candidate = Path(os.path.expanduser(path_text))
+    if not candidate.is_absolute():
+        candidate = Path(cwd, candidate)
+    return candidate
+
+
+def existing_path_candidate(text: str, cwd: str) -> bool:
+    path = path_for_candidate(text, cwd)
+    if path is None:
+        return False
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def path_fragment(text: str) -> str:
+    return strip_wrapping_punctuation(text).strip()
+
+
+def can_join_wrapped_path_fragment(left: str, right: str) -> bool:
+    left = path_fragment(left)
+    right = path_fragment(right)
+    if not left or not right:
+        return False
+    if not WRAPPED_PATH_FRAGMENT_RE.match(left) or not WRAPPED_PATH_FRAGMENT_RE.match(right):
+        return False
+    if is_open_url(left) or is_open_url(right):
+        return False
+    if right.startswith(("/", "~/", "./", "../")):
+        return False
+    if left.endswith(("/", "\\")):
+        return True
+    return looks_like_path(left)
+
+
+def wrapped_path_candidates(text: str, cwd: str) -> list[str]:
+    lines = [path_fragment(line) for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    for start in range(len(lines) - 1):
+        joined = lines[start]
+        for line in lines[start + 1 :]:
+            if not can_join_wrapped_path_fragment(joined, line):
+                break
+            joined = f"{joined}{line}"
+            if joined in seen:
+                continue
+            if looks_like_path(split_line_column(joined)[0]) and existing_path_candidate(joined, cwd):
+                candidates.append(joined)
+                seen.add(joined)
+
+    return candidates
+
+
 def candidate_variants(text: str) -> list[str]:
     variants = []
     seen = set()
@@ -211,24 +281,19 @@ def resolve_path_candidate(text: str, cwd: str) -> tuple[str, str, int | None, i
     if is_open_url(text):
         return None
 
-    if file_path := parse_file_uri(text):
-        text = file_path
-
     path_text, line, column = split_line_column(text)
     path_text = path_text.strip()
     if not path_text or "\n" in path_text or "\r" in path_text:
         return None
 
-    if not looks_like_path(path_text):
-        candidate = Path(cwd, path_text)
-        if not candidate.exists():
-            return None
-    else:
-        candidate = Path(os.path.expanduser(path_text))
-        if not candidate.is_absolute():
-            candidate = Path(cwd, candidate)
-        if any(character.isspace() for character in path_text) and not candidate.exists():
-            return None
+    candidate = path_for_candidate(text, cwd)
+    if candidate is None:
+        return None
+
+    if not looks_like_path(path_text) and not candidate.exists():
+        return None
+    if looks_like_path(path_text) and any(character.isspace() for character in path_text) and not candidate.exists():
+        return None
 
     target_type = "folder" if candidate.is_dir() else "file"
     return str(candidate.resolve(strict=False)), target_type, line, column
@@ -277,6 +342,10 @@ def file_target_candidates(text: str) -> list[str]:
 
 
 def extract_file_target(text: str, cwd: str) -> str | None:
+    for candidate in wrapped_path_candidates(clean_selection(text), cwd):
+        if target := valid_file_target(candidate, cwd):
+            return target
+
     for candidate in file_target_candidates(clean_selection(text)):
         if target := valid_file_target(candidate, cwd):
             return target
@@ -339,6 +408,8 @@ def build_request(selection: str, cwd: str, ssh_host: str | None) -> dict[str, o
         "path": path,
         "target_type": target_type,
     }
+    if target_type == "file":
+        request["workspace_path"] = str(Path(os.path.expanduser(cwd)).resolve(strict=False))
     if ssh_host:
         request["ssh_host"] = ssh_host
     if line is not None:

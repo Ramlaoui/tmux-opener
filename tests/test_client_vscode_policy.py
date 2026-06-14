@@ -23,7 +23,7 @@ def open_vscode_remote(
     request: dict[str, object],
     *,
     folder_window: str = "new",
-    file_window: str = "reuse",
+    file_window: str = "new",
 ) -> None:
     client["open_vscode_remote"](
         request,
@@ -72,6 +72,7 @@ def test_vscode_remote_default_window_policies_are_logged(monkeypatch: Any, caps
             "action": "open_vscode_remote",
             "ssh_host": "devbox",
             "path": "/work/project/app.py",
+            "workspace_path": "/work/project",
             "target_type": "file",
             "line": 12,
             "column": 4,
@@ -79,8 +80,8 @@ def test_vscode_remote_default_window_policies_are_logged(monkeypatch: Any, caps
     )
     output = capsys.readouterr().out
     assert (
-        f"dry-run code: {FAKE_CODE} --reuse-window --goto --remote "
-        "ssh-remote+devbox /work/project/app.py:12:4"
+        f"dry-run code: {FAKE_CODE} --new-window --goto --remote "
+        "ssh-remote+devbox /work/project /work/project/app.py:12:4"
     ) in output
 
 
@@ -108,13 +109,14 @@ def test_vscode_remote_window_policies_are_configurable(monkeypatch: Any, capsys
             "action": "open_vscode_remote",
             "ssh_host": "devbox",
             "path": "/work/project/app.py",
+            "workspace_path": "/work/project",
             "target_type": "file",
             "line": 12,
         },
-        file_window="new",
+        file_window="reuse",
     )
     output = capsys.readouterr().out
     assert (
-        f"dry-run code: {FAKE_CODE} --new-window --goto --remote "
-        "ssh-remote+devbox /work/project/app.py:12"
+        f"dry-run code: {FAKE_CODE} --reuse-window --goto --remote "
+        "ssh-remote+devbox /work/project /work/project/app.py:12"
     ) in output

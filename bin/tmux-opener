@@ -295,7 +295,7 @@ def client_command(
     socket_path: Path,
     client_verbose: bool = False,
     vscode_folder_window: str = "new",
-    vscode_file_window: str = "reuse",
+    vscode_file_window: str = "new",
 ) -> list[str]:
     command = [
         str(CLIENT),
@@ -321,7 +321,7 @@ def start_client(
     client_verbose: bool = False,
     dry_run: bool = False,
     vscode_folder_window: str = "new",
-    vscode_file_window: str = "reuse",
+    vscode_file_window: str = "new",
 ) -> None:
     log_path = socket_path.with_suffix(".log")
     command = client_command(host, socket_path, client_verbose, vscode_folder_window, vscode_file_window)
@@ -683,7 +683,7 @@ def status(args: argparse.Namespace) -> None:
     print(f"expected default/allowed SSH host: {host}")
 
 
-def service_unit(host: str, socket_path: Path, vscode_folder_window: str = "new", vscode_file_window: str = "reuse") -> str:
+def service_unit(host: str, socket_path: Path, vscode_folder_window: str = "new", vscode_file_window: str = "new") -> str:
     command = client_command(
         host,
         socket_path,
@@ -772,7 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
     ssh.add_argument("--no-start-client", action="store_true")
     ssh.add_argument("--client-verbose", action="store_true", help="start the local client with full request-payload logging")
     ssh.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
-    ssh.add_argument("--vscode-file-window", choices=("new", "reuse"), default="reuse")
+    ssh.add_argument("--vscode-file-window", choices=("new", "reuse"), default="new")
     ssh.set_defaults(func=run_ssh)
 
     doctor_parser = subcommands.add_parser("doctor", help="show local lifecycle diagnostics for a host")
@@ -798,7 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument("--dry-run", action="store_true")
     restart.add_argument("--client-verbose", action="store_true", help="start the local client with full request-payload logging")
     restart.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
-    restart.add_argument("--vscode-file-window", choices=("new", "reuse"), default="reuse")
+    restart.add_argument("--vscode-file-window", choices=("new", "reuse"), default="new")
     restart.set_defaults(func=restart_client)
 
     service = subcommands.add_parser("install-service", help="print a local client service unit")
@@ -809,7 +809,7 @@ def build_parser() -> argparse.ArgumentParser:
     service.add_argument("--systemd-user", action="store_true")
     service.add_argument("--dry-run", action="store_true")
     service.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
-    service.add_argument("--vscode-file-window", choices=("new", "reuse"), default="reuse")
+    service.add_argument("--vscode-file-window", choices=("new", "reuse"), default="new")
     service.set_defaults(func=install_service)
 
     return parser

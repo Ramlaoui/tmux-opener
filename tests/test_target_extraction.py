@@ -99,6 +99,7 @@ def test_pytest_failure_nodeid_resolves_relative_to_cwd(tmp_path: Path) -> None:
 
     assert request is not None
     assert request["path"] == str(test_file)
+    assert request["workspace_path"] == str(tmp_path)
     assert "line" not in request
     assert "column" not in request
 
@@ -131,6 +132,7 @@ def test_existing_relative_filename_without_slash_can_have_line(tmp_path: Path) 
 
     assert request is not None
     assert request["path"] == str(source)
+    assert request["workspace_path"] == str(tmp_path)
     assert request["line"] == 9
 
 
@@ -143,6 +145,42 @@ def test_folder_target_type_is_preserved(tmp_path: Path) -> None:
     assert request is not None
     assert request["path"] == str(folder)
     assert request["target_type"] == "folder"
+
+
+def test_soft_wrapped_path_joined_after_directory_boundary(tmp_path: Path) -> None:
+    target = touch(
+        tmp_path
+        / "entaloracle/src/config/experiments/finetune/uma/from_ssl"
+        / "distill_target_labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml"
+    )
+
+    request = build(
+        "entaloracle/src/config/experiments/finetune/uma/from_ssl/\n"
+        "distill_target_labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml",
+        tmp_path,
+    )
+
+    assert request is not None
+    assert request["path"] == str(target)
+    assert request["target_type"] == "file"
+
+
+def test_soft_wrapped_path_joined_inside_filename(tmp_path: Path) -> None:
+    target = touch(
+        tmp_path
+        / "entaloracle/src/config/experiments/finetune/uma/from_ssl"
+        / "distill_target_labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml"
+    )
+
+    request = build(
+        "entaloracle/src/config/experiments/finetune/uma/from_ssl/distill_target_\n"
+        "labels_uma_s_1p1_oc20_seed20260527_ec_compref_loaded_model.yaml",
+        tmp_path,
+    )
+
+    assert request is not None
+    assert request["path"] == str(target)
+    assert request["target_type"] == "file"
 
 
 def test_random_text_is_not_treated_as_a_path(tmp_path: Path) -> None:
