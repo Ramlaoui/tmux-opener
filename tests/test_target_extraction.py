@@ -44,6 +44,20 @@ def test_soft_wrapped_url_removes_copy_mode_whitespace(tmp_path: Path) -> None:
     }
 
 
+def test_soft_wrapped_url_removes_table_borders(tmp_path: Path) -> None:
+    request = build(
+        "| https://example.test/docs/very-long-\r\n"
+        "| path?token=abc#install |",
+        tmp_path,
+    )
+
+    assert request == {
+        "version": 1,
+        "action": "open_url",
+        "url": "https://example.test/docs/very-long-path?token=abc#install",
+    }
+
+
 def test_soft_wrapped_url_preserves_encoded_spaces(tmp_path: Path) -> None:
     request = build("https://example.test/docs/a%20b", tmp_path)
 

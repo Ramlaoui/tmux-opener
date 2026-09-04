@@ -15,6 +15,7 @@ from pathlib import Path
 
 URL_RE = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*://|mailto:)")
 URL_WHITESPACE_RE = re.compile(r"\s+")
+URL_LINE_BORDER_RE = re.compile(r"^\s*[|│┃║]+\s*|\s*[|│┃║]+\s*$")
 LOCALHOST_TOKEN_RE = re.compile(
     r"^(?:(?P<scheme>https?)://)?"
     r"(?P<host>localhost|127\.0\.0\.1|0\.0\.0\.0)"
@@ -281,11 +282,12 @@ def candidate_variants(text: str) -> list[str]:
 def normalize_url_candidate(text: str) -> str | None:
     """Return a URL candidate with copy-mode soft-wrap whitespace removed."""
     for variant in candidate_variants(text):
+        variant = "\n".join(URL_LINE_BORDER_RE.sub("", line) for line in variant.splitlines())
         if not is_open_url(variant):
             continue
 
         normalized = URL_WHITESPACE_RE.sub("", variant)
-        if is_open_url(normalized):
+        if is_open_url(normalized) and not any(border in normalized for border in "|│┃║"):
             return normalized
 
     return None
