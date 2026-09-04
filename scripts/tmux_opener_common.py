@@ -14,6 +14,8 @@ from pathlib import Path
 
 
 URL_RE = re.compile(r"^(?:[a-zA-Z][a-zA-Z0-9+.-]*://|mailto:)")
+URL_WHITESPACE_RE = re.compile(r"\s+")
+URL_LINE_BORDER_RE = re.compile(r"^\s*[|│┃║]+\s*|\s*[|│┃║]+\s*$")
 LOCALHOST_TOKEN_RE = re.compile(
     r"^(?:(?P<scheme>https?)://)?"
     r"(?P<host>localhost|127\.0\.0\.1|0\.0\.0\.0)"
@@ -277,6 +279,20 @@ def candidate_variants(text: str) -> list[str]:
     return variants
 
 
+def normalize_url_candidate(text: str) -> str | None:
+    """Return a URL candidate with copy-mode soft-wrap whitespace removed."""
+    for variant in candidate_variants(text):
+        variant = "\n".join(URL_LINE_BORDER_RE.sub("", line) for line in variant.splitlines())
+        if not is_open_url(variant):
+            continue
+
+        normalized = URL_WHITESPACE_RE.sub("", variant)
+        if is_open_url(normalized) and not any(border in normalized for border in "|│┃║"):
+            return normalized
+
+    return None
+
+
 def resolve_path_candidate(text: str, cwd: str) -> tuple[str, str, int | None, int | None] | None:
     if is_open_url(text):
         return None
@@ -357,14 +373,8 @@ def extract_target(text: str, cwd: str) -> str | None:
     if parse_remote_localhost(text):
         return text
 
-    if is_open_url(text):
-        return text
-
-    for variant in candidate_variants(text):
-        if parse_remote_localhost(variant):
-            return variant
-        if is_open_url(variant):
-            return variant
+    if url := normalize_url_candidate(text):
+        return url
 
     return extract_file_target(text, cwd)
 
