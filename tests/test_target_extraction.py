@@ -30,6 +30,27 @@ def test_url_fragment_is_preserved_when_wrapped(tmp_path: Path) -> None:
     }
 
 
+def test_soft_wrapped_url_removes_copy_mode_whitespace(tmp_path: Path) -> None:
+    request = build(
+        "https://example.test/docs/very-long- \r\n"
+        " path?token=abc#install",
+        tmp_path,
+    )
+
+    assert request == {
+        "version": 1,
+        "action": "open_url",
+        "url": "https://example.test/docs/very-long-path?token=abc#install",
+    }
+
+
+def test_soft_wrapped_url_preserves_encoded_spaces(tmp_path: Path) -> None:
+    request = build("https://example.test/docs/a%20b", tmp_path)
+
+    assert request is not None
+    assert request["url"] == "https://example.test/docs/a%20b"
+
+
 def test_bare_localhost_port_builds_remote_localhost_request(tmp_path: Path) -> None:
     request = build("localhost:8080", tmp_path)
 
