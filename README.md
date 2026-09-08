@@ -177,7 +177,17 @@ Logs:
 - Local client: `~/.local/state/tmux-opener/HOST.log`
 - Remote sender: `~/.local/state/tmux-opener/sender.log`
 
-Preview launches without opening apps:
+The client reads each request under a two-second absolute deadline and a 1 MiB
+limit. Up to 32 peer connections are admitted; desktop dispatch is serialized
+with one waiting request. Health checks remain responsive during partial reads
+and slow dispatch. Requests rejected as busy are not automatically retried.
+
+Normal client logs identify actions without recording request targets. `--verbose`
+(or `tmux-opener ssh --client-verbose`) explicitly enables sensitive request and
+command logging: URLs, query tokens, remote paths, and SSH diagnostics may appear.
+Treat verbose logs as private and redact them before sharing.
+
+Preview launches without opening apps (add `--verbose` to inspect full commands):
 
 ```sh
 pkill -f tmux-opener-client || true

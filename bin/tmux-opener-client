@@ -9,18 +9,20 @@ import fcntl
 import json
 import os
 import platform
+import queue
 import re
 import shlex
+import selectors
 import shutil
 import signal
 import socket
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +40,12 @@ PROCESS_STDERR_LOG_LIMIT = 2000
 VSCODE_WINDOW_POLICIES = ("new", "reuse")
 LOCALHOST_SCHEMES = ("http", "https")
 REMOTE_LOCALHOST_HOSTS = ("localhost", "127.0.0.1")
+REQUEST_TIMEOUT = 2.0
+MAX_REQUEST_BYTES = 1024 * 1024
+MAX_CONNECTIONS = 32
+MAX_LAUNCHES = 32
+INSTANCE_ID = uuid.uuid4().hex
+LAUNCHED_PROCESSES: list[subprocess.Popen[bytes]] = []
 
 
 @dataclass(slots=True)
@@ -60,43 +68,27 @@ def default_socket_path() -> str:
     return os.path.expanduser("~/.local/state/tmux-opener/opener.sock")
 
 
-def read_request(conn: socket.socket) -> dict[str, object]:
-    chunks: list[bytes] = []
-    total = 0
-    while True:
-        chunk = conn.recv(65536)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > 1024 * 1024:
-            raise RequestError("request is too large")
-        if b"\n" in chunk:
-            break
-
-    raw = b"".join(chunks).split(b"\n", 1)[0]
+def parse_request(raw: bytes) -> dict[str, object]:
     if not raw:
         raise RequestError("empty request")
 
     try:
         request = json.loads(raw.decode("utf-8"))
-    except json.JSONDecodeError as exc:
-        raise RequestError(f"invalid json: {exc}") from exc
+    except (ValueError, RecursionError) as exc:
+        raise RequestError("invalid JSON request") from exc
 
     if not isinstance(request, dict):
         raise RequestError("request must be a JSON object")
-    if request.get("version") != 1:
+    if type(request.get("version")) is not int or request["version"] != 1:
         raise RequestError("unsupported request version")
     return request
-
-
-def send_response(conn: socket.socket, response: dict[str, object]) -> None:
-    conn.sendall(json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n")
 
 
 def ping_response(args: argparse.Namespace) -> dict[str, object]:
     return {
         "ok": True,
+        "version": 1,
+        "instance_id": INSTANCE_ID,
         "client": "tmux-opener-client",
         "pid": os.getpid(),
         "default_ssh_host": args.default_ssh_host,
@@ -115,20 +107,31 @@ def log_line(message: str) -> None:
     print(f"{timestamp} {message}", flush=True)
 
 
+def reap_children() -> None:
+    for process in LAUNCHED_PROCESSES[:]:
+        returncode = process.poll()
+        if returncode is not None:
+            LAUNCHED_PROCESSES.remove(process)
+            if returncode:
+                log_line(f"opener exited nonzero rc={returncode}")
+
+
 def launch_command(
     command: list[str],
     dry_run: bool,
     verbose: bool,
     command_label: str | None = None,
 ) -> None:
-    command_display = command_text(command)
-    label = f" {command_label}" if command_label else ""
+    label = command_label or "system opener"
+    command_display = command_text(command) if verbose else label
     if dry_run:
-        log_line(f"dry-run{label}: {command_display}")
+        log_line(f"dry-run {command_display}")
         return
 
-    log_line(f"launch{label}: {command_display}")
-
+    reap_children()
+    if len(LAUNCHED_PROCESSES) >= MAX_LAUNCHES:
+        raise RequestError("too many running openers")
+    log_line(f"launch {command_display}")
     try:
         process = subprocess.Popen(
             command,
@@ -137,15 +140,9 @@ def launch_command(
             stdin=subprocess.DEVNULL,
         )
     except OSError as exc:
-        raise RequestError(f"failed to launch {command_display}: {exc}") from exc
+        raise RequestError(f"failed to launch opener (errno={exc.errno})") from exc
 
-    threading.Thread(target=reap_child, args=(process, command_display), daemon=True).start()
-
-
-def reap_child(process: subprocess.Popen[bytes], command_display: str) -> None:
-    returncode = process.wait()
-    if returncode:
-        log_line(f"launch exited nonzero rc={returncode}: {command_display}")
+    LAUNCHED_PROCESSES.append(process)
 
 
 def open_with_system(target: str, dry_run: bool, verbose: bool) -> None:
@@ -163,9 +160,15 @@ def open_with_system(target: str, dry_run: bool, verbose: bool) -> None:
 def validate_url(url: object, allowed_schemes: set[str]) -> str:
     if not isinstance(url, str):
         raise RequestError("url must be a string")
-    parsed = urllib.parse.urlparse(url)
+    if "\x00" in url:
+        raise RequestError("url contains a NUL byte")
+    try:
+        url.encode("utf-8")
+        parsed = urllib.parse.urlparse(url)
+    except (ValueError, UnicodeError) as exc:
+        raise RequestError("invalid URL") from exc
     if parsed.scheme not in allowed_schemes:
-        raise RequestError(f"url scheme is not allowed: {parsed.scheme}")
+        raise RequestError("url scheme is not allowed")
     if not parsed.netloc and parsed.scheme in {"http", "https"}:
         raise RequestError("url must include a host")
     return url
@@ -174,10 +177,10 @@ def validate_url(url: object, allowed_schemes: set[str]) -> str:
 def validate_host(host: object, allowed_hosts: set[str] | None) -> str:
     if not isinstance(host, str) or not host:
         raise RequestError("ssh_host must be a non-empty string")
-    if not HOST_RE.match(host):
+    if not HOST_RE.fullmatch(host):
         raise RequestError("ssh_host contains unsupported characters")
     if allowed_hosts is not None and host not in allowed_hosts:
-        raise RequestError(f"ssh_host is not allowed: {host}")
+        raise RequestError("ssh_host is not allowed")
     return host
 
 
@@ -186,6 +189,10 @@ def validate_path(path: object) -> str:
         raise RequestError("path must be an absolute remote path")
     if "\x00" in path:
         raise RequestError("path contains a NUL byte")
+    try:
+        path.encode("utf-8")
+    except UnicodeError as exc:
+        raise RequestError("path contains invalid Unicode") from exc
     return path
 
 
@@ -194,7 +201,7 @@ def validate_target_type(target_type: object) -> str:
         return "file"
     if target_type == "folder":
         return "folder"
-    raise RequestError(f"unsupported target_type: {target_type}")
+    raise RequestError("unsupported target_type")
 
 
 def validate_port(value: object, field: str = "port") -> int:
@@ -210,13 +217,13 @@ def validate_remote_localhost_host(value: object) -> str:
         return "127.0.0.1"
     if value in REMOTE_LOCALHOST_HOSTS:
         return str(value)
-    raise RequestError(f"unsupported remote localhost host: {value}")
+    raise RequestError("unsupported remote localhost host")
 
 
 def validate_remote_localhost_scheme(value: object) -> str:
     if value in LOCALHOST_SCHEMES:
         return str(value)
-    raise RequestError(f"unsupported remote localhost scheme: {value}")
+    raise RequestError("unsupported remote localhost scheme")
 
 
 def validate_url_part(value: object, field: str, prefix: str | None = None) -> str:
@@ -226,6 +233,10 @@ def validate_url_part(value: object, field: str, prefix: str | None = None) -> s
         raise RequestError(f"{field} must be a string")
     if "\x00" in value or "\r" in value or "\n" in value:
         raise RequestError(f"{field} contains unsupported characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeError as exc:
+        raise RequestError(f"{field} contains invalid Unicode") from exc
     if prefix and value and not value.startswith(prefix):
         raise RequestError(f"{field} must start with {prefix}")
     return value
@@ -252,7 +263,7 @@ def vscode_window_flags(policy: str) -> list[str]:
         return ["--new-window"]
     if policy == "reuse":
         return ["--reuse-window"]
-    raise RequestError(f"unsupported VS Code window policy: {policy}")
+    raise RequestError("unsupported VS Code window policy")
 
 
 def open_vscode_remote(
@@ -302,9 +313,8 @@ def open_vscode_remote(
 
 def active_remote_localhost_forwards() -> list[dict[str, object]]:
     active = []
-    for key, forward in list(REMOTE_LOCALHOST_FORWARDS.items()):
+    for forward in list(REMOTE_LOCALHOST_FORWARDS.values()):
         if forward.process.poll() is not None:
-            REMOTE_LOCALHOST_FORWARDS.pop(key, None)
             continue
         active.append(
             {
@@ -414,16 +424,18 @@ def watch_localhost_forward(
     process: subprocess.Popen[bytes],
     command_display: str,
     stderr_log: BinaryIO,
+    verbose: bool = False,
 ) -> None:
     try:
         returncode = process.wait()
         current = REMOTE_LOCALHOST_FORWARDS.get(key)
         if current is not None and current.process is process:
             REMOTE_LOCALHOST_FORWARDS.pop(key, None)
+        suffix = stderr_suffix(stderr_log) if verbose else ""
         if returncode:
-            log_line(f"localhost forward exited nonzero rc={returncode}: {command_display}{stderr_suffix(stderr_log)}")
+            log_line(f"localhost forward exited nonzero rc={returncode}: {command_display}{suffix}")
         else:
-            log_line(f"localhost forward exited: {command_display}{stderr_suffix(stderr_log)}")
+            log_line(f"localhost forward exited: {command_display}{suffix}")
     finally:
         stderr_log.close()
 
@@ -537,7 +549,7 @@ def ensure_remote_localhost_forward(
         )
         threading.Thread(
             target=watch_localhost_forward,
-            args=(key, process, command_display, stderr_log),
+            args=(key, process, command_display, stderr_log, args.verbose),
             daemon=True,
         ).start()
     except BaseException as exc:
@@ -586,6 +598,9 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
     if action == "ping":
         return
 
+    if action in ("open_url", "open_vscode_remote", "open_remote_localhost"):
+        log_line(f"request action={action}")
+
     if action == "open_url":
         open_with_system(
             validate_url(request.get("url"), set(args.allow_url_scheme)),
@@ -625,23 +640,163 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
         open_remote_localhost(request, allowed_hosts, args)
         return
 
-    raise RequestError(f"unsupported action: {action}")
+    raise RequestError("unsupported action")
 
 
-def serve_once(server: socket.socket, args: argparse.Namespace) -> None:
-    conn, _addr = server.accept()
-    with conn:
+@dataclass(slots=True)
+class Peer:
+    conn: socket.socket
+    data: bytearray
+    deadline: float
+    response: bytes | None = None
+    sent: int = 0
+
+
+def serve(server: socket.socket, args: argparse.Namespace, stop: threading.Event) -> None:
+    # Only the main thread dispatches Open Requests. One I/O thread keeps health
+    # and frame deadlines independent of slow desktop/tunnel startup.
+    requests: queue.Queue[tuple[Peer, dict[str, object]]] = queue.Queue(maxsize=1)
+    responses: queue.Queue[tuple[Peer, dict[str, object]]] = queue.Queue(maxsize=MAX_CONNECTIONS)
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def network_loop() -> None:
+        peers: dict[socket.socket, Peer] = {}
+        with selectors.DefaultSelector() as selector:
+            def close_peer(peer: Peer) -> None:
+                try:
+                    selector.unregister(peer.conn)
+                except KeyError:
+                    pass  # A queued request is not registered for socket events.
+                peers.pop(peer.conn, None)
+                peer.conn.close()
+                if args.once:
+                    finished.set()
+
+            def respond(peer: Peer, response: dict[str, object]) -> None:
+                peer.data.clear()
+                peer.response = json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n"
+                peer.deadline = time.monotonic() + REQUEST_TIMEOUT
+                try:
+                    selector.modify(peer.conn, selectors.EVENT_WRITE, peer)
+                except KeyError:
+                    selector.register(peer.conn, selectors.EVENT_WRITE, peer)
+
+            def reject(peer: Peer, reason: str) -> None:
+                log_line(f"reject: {reason}")
+                respond(peer, {"ok": False, "error": reason})
+
+            try:
+                server.setblocking(False)
+                selector.register(server, selectors.EVENT_READ)
+                while not stop.is_set() and not finished.is_set():
+                    while True:
+                        try:
+                            peer, response = responses.get_nowait()
+                        except queue.Empty:
+                            break
+                        respond(peer, response)
+                    for peer in list(peers.values()):
+                        if time.monotonic() >= peer.deadline:
+                            if peer.response is None:
+                                reject(peer, "request timed out")
+                            else:
+                                close_peer(peer)
+                    for key, _events in selector.select(timeout=0.05):
+                        if stop.is_set() or finished.is_set():
+                            break
+                        if key.fileobj is server:
+                            try:
+                                conn, _addr = server.accept()
+                            except (BlockingIOError, ConnectionAbortedError):
+                                continue
+                            if len(peers) >= MAX_CONNECTIONS:
+                                conn.close()
+                                continue
+                            conn.setblocking(False)
+                            peer = Peer(conn, bytearray(), time.monotonic() + REQUEST_TIMEOUT)
+                            peers[conn] = peer
+                            selector.register(conn, selectors.EVENT_READ, peer)
+                            if args.once:
+                                selector.unregister(server)
+                            continue
+                        peer = key.data
+                        if peer.conn not in peers:
+                            continue
+                        try:
+                            if peer.response is not None:
+                                count = peer.conn.send(memoryview(peer.response)[peer.sent:])
+                                peer.sent += count
+                                if count == 0 or peer.sent == len(peer.response):
+                                    close_peer(peer)
+                                continue
+                            if time.monotonic() >= peer.deadline:
+                                reject(peer, "request timed out")
+                                continue
+                            chunk = peer.conn.recv(min(65536, MAX_REQUEST_BYTES + 1 - len(peer.data)))
+                        except BlockingIOError:
+                            continue
+                        except OSError:
+                            close_peer(peer)
+                            continue
+                        peer.data.extend(chunk)
+                        if len(peer.data) > MAX_REQUEST_BYTES:
+                            reject(peer, "request is too large")
+                            continue
+                        if chunk and b"\n" not in chunk:
+                            continue
+                        try:
+                            request = parse_request(bytes(peer.data).split(b"\n", 1)[0])
+                        except RequestError as exc:
+                            reject(peer, str(exc))
+                            continue
+                        if request.get("action") == "ping":
+                            respond(peer, ping_response(args))
+                            continue
+                        try:
+                            requests.put_nowait((peer, request))
+                        except queue.Full:
+                            reject(peer, "client is busy")
+                            continue
+                        peer.data.clear()
+                        peer.deadline = float("inf")
+                        selector.unregister(peer.conn)
+            finally:
+                for peer in list(peers.values()):
+                    close_peer(peer)
+
+    def run_network() -> None:
         try:
-            request = read_request(conn)
-            if request.get("action") == "ping":
-                send_response(conn, ping_response(args))
-                return
-            dispatch(request, args)
-        except RequestError as exc:
-            log_line(f"reject: {exc}")
-            send_response(conn, {"ok": False, "error": str(exc)})
-            return
-        send_response(conn, {"ok": True})
+            network_loop()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=run_network, name="opener-io")
+    worker.start()
+    try:
+        while not stop.is_set() and not finished.is_set():
+            reap_children()
+            try:
+                peer, request = requests.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if stop.is_set() or finished.is_set():
+                break
+            try:
+                dispatch(request, args)
+                response: dict[str, object] = {"ok": True}
+            except RequestError as exc:
+                log_line(f"reject: {exc}")
+                response = {"ok": False, "error": str(exc)}
+            if not stop.is_set() and not finished.is_set():
+                responses.put_nowait((peer, response))
+    finally:
+        stop.set()
+        worker.join()
+    if failures:
+        raise failures[0]
 
 
 class OwnedServer(socket.socket):
@@ -717,7 +872,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default=default_socket_path(), help="local Unix socket path")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--verbose", action="store_true", help="log full received request payloads")
+    parser.add_argument("--verbose", action="store_true", help="log sensitive request payloads and commands")
     parser.add_argument("--once", action="store_true", help="serve one request and exit")
     parser.add_argument("--allow-url-scheme", action="append", default=list(DEFAULT_URL_SCHEMES))
     parser.add_argument("--allow-ssh-host", action="append", default=[])
@@ -751,25 +906,17 @@ def main() -> int:
     args = parser.parse_args()
 
     server = bind_server(args.socket)
-    stop = False
+    stop = threading.Event()
 
     def handle_signal(_signum: int, _frame: object) -> None:
-        nonlocal stop
-        stop = True
-        server.close()
+        stop.set()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     log_line(f"tmux-opener-client listening on {args.socket}")
     try:
-        while not stop:
-            serve_once(server, args)
-            if args.once:
-                break
-    except OSError:
-        if not stop:
-            raise
+        serve(server, args, stop)
     finally:
         stop_remote_localhost_forwards()
         server.cleanup()
