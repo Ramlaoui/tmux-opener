@@ -46,3 +46,8 @@ action may already have happened.
 
 The default request deadline is five seconds, including response reads; the
 dispatcher keeps its preliminary health probe capped at 0.75 seconds.
+
+Sender logs contain action names and delivery status, not selected URLs, paths,
+or response payloads. Log files are private to the current user. Explicit
+`--print-request` output and terminal fallback hyperlinks still contain the
+selected target; do not publish them when opening sensitive links.

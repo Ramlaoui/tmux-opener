@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -62,31 +63,24 @@ def log_line(log_path: str | None, message: str) -> None:
 
     try:
         path = Path(log_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         timestamp = datetime.now().isoformat(timespec="seconds")
-        with path.open("a", encoding="utf-8") as handle:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                return
+            os.fchmod(handle.fileno(), 0o600)
             handle.write(f"{timestamp} {message}\n")
     except OSError:
         pass
 
 
 def describe_request(request: dict[str, object]) -> str:
-    action = str(request.get("action", "unknown"))
-    if action == "open_url":
-        return f"action=open_url url={request.get('url')}"
-    if action == "open_remote_localhost":
-        return (
-            "action=open_remote_localhost "
-            f"host={request.get('ssh_host', 'default')} "
-            f"remote_port={request.get('remote_port')}"
-        )
-    if action == "open_vscode_remote":
-        return (
-            "action=open_vscode_remote "
-            f"type={request.get('target_type', 'file')} "
-            f"path={request.get('path')}"
-        )
-    return f"action={action}"
+    action = request.get("action")
+    if action in ("open_url", "open_remote_localhost", "open_vscode_remote", "ping"):
+        return f"action={action}"
+    return "action=unknown"
 
 
 def default_ssh_host() -> str | None:
@@ -544,7 +538,7 @@ def deliver_request(
 
     if not response.get("ok", False):
         error = response.get("error", "request rejected")
-        log_line(log_path, f"send rejected: socket={socket_path} {describe_request(request)} error={error}")
+        log_line(log_path, f"send rejected: {describe_request(request)}")
         return fallback_message(request, str(error), fallback)
 
     log_line(log_path, f"send ok: socket={socket_path} {describe_request(request)}")
