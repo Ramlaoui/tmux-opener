@@ -106,16 +106,24 @@ tmux-opener-send localhost:8080
 tmux-opener-send http://127.0.0.1:8888/lab?token=abc
 ```
 
-The local client starts or reuses an SSH tunnel such as:
+The Local Opener Client starts or reuses a supervised auxiliary SSH connection
+and opens a rewritten local URL, for example `http://127.0.0.1:18080`.
+It establishes a private control master using the original SSH configuration
+with **all inherited forwarding disabled**, then requests only the desired
+`127.0.0.1:18080:localhost:8080` local forward over that private control socket.
+This auxiliary connection never requests the managed bridge `RemoteForward`.
 
-```sh
-ssh -N -S none -o ExitOnForwardFailure=no -o ForkAfterAuthentication=no \
-  -L 127.0.0.1:18080:localhost:8080 HOST
-```
+Host aliases, authentication, identities, host-key checking, `Include`/`Match`,
+and `ProxyJump`/`ProxyCommand` remain evaluated by OpenSSH in their original
+configuration context. A custom wrapper `--ssh-config` is passed to the client;
+standalone clients can supply the same option. The control-only forwarding
+operation reads no SSH config and cannot fall back to a new connection.
 
-and opens the rewritten local URL, for example
-`http://127.0.0.1:18080`. The client verifies that the local listener is
-ready before opening the URL.
+The client verifies the local listener before opening the URL. It removes the
+private control socket after setup and terminates the auxiliary process on
+startup failure or client shutdown. No separate persistent master is left
+behind. Both setup stages are bounded; slow authentication can fail explicitly
+rather than leaving an unmanaged connection.
 
 Remove a managed host snippet with:
 

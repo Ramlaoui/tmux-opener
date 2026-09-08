@@ -425,6 +425,39 @@ def watch_localhost_forward(
         stderr_log.close()
 
 
+def localhost_forward_commands(
+    ssh_host: str,
+    remote_host: str,
+    remote_port: int,
+    local_port: int,
+    control_path: str,
+    ssh_config: str | None,
+) -> tuple[list[str], list[str]]:
+    ssh = shutil.which("ssh") or "ssh"
+    master = [ssh]
+    if ssh_config is not None:
+        master.extend(["-F", str(Path(ssh_config).expanduser())])
+    master.extend(
+        [
+            "-M", "-N", "-S", control_path,
+            "-o", "ControlPersist=no",
+            "-o", "ClearAllForwardings=yes",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ForkAfterAuthentication=no",
+            "--", ssh_host,
+        ]
+    )
+    # Authentication/routing belong to the master above. This control operation
+    # cannot connect independently: -O fails if the private master is unavailable.
+    # Reading no config here prevents inherited forwards joining the explicit -L.
+    forward = [
+        ssh, "-F", os.devnull, "-S", control_path, "-O", "forward",
+        "-L", f"127.0.0.1:{local_port}:{remote_host}:{remote_port}",
+        "--", ssh_host,
+    ]
+    return master, forward
+
+
 def ensure_remote_localhost_forward(
     ssh_host: str,
     remote_host: str,
@@ -443,58 +476,81 @@ def ensure_remote_localhost_forward(
         args.localhost_forward_start_port,
         args.localhost_forward_end_port,
     )
-    command = [
-        shutil.which("ssh") or "ssh",
-        "-N",
-        "-S",
-        "none",
-        # Host config may already contain the bridge RemoteForward. Keep those
-        # inherited forwards non-fatal and verify our local -L listener below.
-        "-o",
-        "ExitOnForwardFailure=no",
-        "-o",
-        "ForkAfterAuthentication=no",
-        "-L",
-        f"127.0.0.1:{local_port}:{remote_host}:{remote_port}",
-        ssh_host,
-    ]
-    command_display = command_text(command)
-    if args.dry_run:
-        log_line(f"dry-run tunnel: {command_display}")
-        return local_port
-
-    log_line(f"launch tunnel: {command_display}")
     stderr_log = tempfile.TemporaryFile()
+    process = None
+    command_display = f"localhost forward on 127.0.0.1:{local_port}"
     try:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.DEVNULL,
-            stderr=stderr_log,
-            stdin=subprocess.DEVNULL,
+        # No SSH config is reserialized: OpenSSH itself evaluates Includes,
+        # Match, quoting, identities and proxies in the original config context.
+        with tempfile.TemporaryDirectory(prefix="tmux-opener-") as control_dir:
+            control_path = str(Path(control_dir) / "control")
+            master, forward_command = localhost_forward_commands(
+                ssh_host, remote_host, remote_port, local_port, control_path, args.ssh_config
+            )
+            if args.dry_run:
+                log_line(f"dry-run tunnel master: {command_text(master)}")
+                log_line(f"dry-run tunnel forward: {command_text(forward_command)}")
+                stderr_log.close()
+                return local_port
+            if args.verbose:
+                command_display = command_text(master)
+                log_line(f"launch tunnel forward: {command_text(forward_command)}")
+            log_line(f"launch tunnel: {command_display}")
+            process = subprocess.Popen(
+                master,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_log,
+                stdin=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + LOCALHOST_FORWARD_STARTUP_TIMEOUT
+            while not Path(control_path).exists():
+                returncode = process.poll()
+                if returncode is not None:
+                    raise RequestError(f"localhost SSH master exited rc={returncode}")
+                if time.monotonic() >= deadline:
+                    raise RequestError("localhost SSH master startup timed out")
+                time.sleep(0.05)
+            result = subprocess.run(
+                forward_command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=stderr_log,
+                timeout=LOCALHOST_FORWARD_STARTUP_TIMEOUT,
+                check=False,
+            )
+            if result.returncode:
+                raise RequestError(f"localhost SSH forwarding failed rc={result.returncode}")
+            ready, returncode = wait_for_localhost_forward_start(process, local_port)
+            if not ready or returncode is not None:
+                raise RequestError(f"localhost forward did not listen on 127.0.0.1:{local_port}")
+        # The control operation is complete. Unlinking its private socket closes
+        # access to this master, not its TCP forward; the client owns its process.
+        REMOTE_LOCALHOST_FORWARDS[key] = LocalhostForward(
+            ssh_host=ssh_host,
+            remote_host=remote_host,
+            remote_port=remote_port,
+            local_port=local_port,
+            process=process,
         )
-    except OSError as exc:
-        stderr_log.close()
-        raise RequestError(f"failed to launch {command_display}: {exc}") from exc
-
-    ready, returncode = wait_for_localhost_forward_start(process, local_port)
-    if not ready:
-        terminate_process(process)
-        suffix = stderr_suffix(stderr_log)
-        stderr_log.close()
-        if returncode is not None:
-            raise RequestError(f"localhost forward exited immediately rc={returncode}: {command_display}{suffix}")
-        raise RequestError(
-            f"localhost forward did not listen on 127.0.0.1:{local_port}: {command_display}{suffix}"
-        )
-
-    REMOTE_LOCALHOST_FORWARDS[key] = LocalhostForward(
-        ssh_host=ssh_host,
-        remote_host=remote_host,
-        remote_port=remote_port,
-        local_port=local_port,
-        process=process,
-    )
-    threading.Thread(target=watch_localhost_forward, args=(key, process, command_display, stderr_log), daemon=True).start()
+        threading.Thread(
+            target=watch_localhost_forward,
+            args=(key, process, command_display, stderr_log),
+            daemon=True,
+        ).start()
+    except BaseException as exc:
+        REMOTE_LOCALHOST_FORWARDS.pop(key, None)
+        try:
+            if process is not None:
+                terminate_process(process)
+            if args.verbose:
+                log_line(f"tunnel startup failed: {command_display}{stderr_suffix(stderr_log)}")
+        finally:
+            stderr_log.close()
+        if isinstance(exc, subprocess.TimeoutExpired):
+            raise RequestError("localhost SSH forwarding timed out") from exc
+        if isinstance(exc, OSError):
+            raise RequestError("failed to start localhost SSH forwarding") from exc
+        raise
     return local_port
 
 
@@ -608,6 +664,7 @@ def main() -> int:
     parser.add_argument("--allow-ssh-host", action="append", default=[])
     parser.add_argument("--allow-any-ssh-host", action="store_true")
     parser.add_argument("--default-ssh-host")
+    parser.add_argument("--ssh-config", help="SSH config used for auxiliary localhost connections")
     parser.add_argument(
         "--vscode-folder-window",
         choices=VSCODE_WINDOW_POLICIES,
