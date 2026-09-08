@@ -35,3 +35,14 @@ set -g @plugin 'Ramlaoui/tmux-opener'
 
 This archive is mainly for pinned server-side installs on remote hosts where a
 Git checkout is inconvenient.
+
+## Delivery guarantees
+
+Update the desktop client alongside this plugin: bridge health requires a
+versioned `tmux-opener-client` ping response. An Open Request succeeds only after
+a complete, valid acknowledgement. A dropped connection or missing reply is not
+success, and requests are never automatically replayed because the desktop
+action may already have happened.
+
+The default request deadline is five seconds, including response reads; the
+dispatcher keeps its preliminary health probe capped at 0.75 seconds.

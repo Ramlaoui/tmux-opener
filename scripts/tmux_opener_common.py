@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
@@ -430,24 +431,54 @@ def build_request(selection: str, cwd: str, ssh_host: str | None) -> dict[str, o
 
 
 def send_request(socket_path: str, request: dict[str, object], timeout: float) -> dict[str, object]:
+    """Require a complete acknowledgement; never replay an uncertain request."""
     payload = json.dumps(request, separators=(",", ":")).encode("utf-8") + b"\n"
+    deadline = time.monotonic() + timeout
+    response = bytearray()
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
         client.settimeout(timeout)
         client.connect(socket_path)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("bridge connection timed out")
+        client.settimeout(remaining)
         client.sendall(payload)
-        raw_response = client.recv(65536)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("bridge acknowledgement timed out; outcome unknown")
+            client.settimeout(remaining)
+            chunk = client.recv(min(65536, 1024 * 1024 + 1 - len(response)))
+            if not chunk:
+                raise OSError("bridge closed before acknowledgement; outcome unknown")
+            response.extend(chunk)
+            if len(response) > 1024 * 1024:
+                raise ValueError("bridge acknowledgement exceeds size limit")
+            if b"\n" in chunk:
+                break
 
-    if not raw_response:
-        return {"ok": True}
-    return json.loads(raw_response.decode("utf-8"))
+    try:
+        parsed = json.loads(response.split(b"\n", 1)[0])
+    except (ValueError, RecursionError) as exc:
+        raise ValueError("bridge acknowledgement is not valid JSON") from exc
+    if not isinstance(parsed, dict) or type(parsed.get("ok")) is not bool:
+        raise ValueError("bridge acknowledgement must contain a boolean ok")
+    if not parsed["ok"] and not isinstance(parsed.get("error"), str):
+        raise ValueError("bridge rejection must contain an error message")
+    return parsed
 
 
 def bridge_available(socket_path: str, timeout: float) -> bool:
     try:
         response = send_request(socket_path, {"version": 1, "action": "ping"}, timeout)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    except (OSError, ValueError):
         return False
-    return bool(response.get("ok", False))
+    return (
+        response["ok"] is True
+        and response.get("client") == "tmux-opener-client"
+        and type(response.get("version")) is int
+        and response["version"] == 1
+    )
 
 
 def osc8(uri: str, label: str) -> str:
@@ -507,9 +538,9 @@ def deliver_request(
     except OSError as exc:
         log_line(log_path, f"send failed: socket={socket_path} {describe_request(request)} error={exc}")
         return fallback_message(request, f"bridge unavailable at {socket_path}: {exc}", fallback)
-    except json.JSONDecodeError as exc:
-        log_line(log_path, f"send failed: socket={socket_path} {describe_request(request)} error=invalid response: {exc}")
-        return fallback_message(request, f"invalid bridge response: {exc}", fallback)
+    except ValueError:
+        log_line(log_path, f"send failed: {describe_request(request)} error=invalid acknowledgement")
+        return fallback_message(request, "invalid bridge acknowledgement; outcome unknown", fallback)
 
     if not response.get("ok", False):
         error = response.get("error", "request rejected")
