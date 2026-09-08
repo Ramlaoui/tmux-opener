@@ -87,3 +87,25 @@ configuration; SSH snippets, logs and coordination locks remain. Service names a
 derived from the absolute socket path, so use the same `--socket`/`--state-dir` when
 managing a custom installation. An unresponsive owner is never replaced on a
 health timeout; inspect the native service manager and log before retrying.
+
+## Diagnose the existing bridge
+
+```sh
+tmux-opener doctor HOST
+tmux-opener doctor HOST --remote --ssh-config /path/to/ssh-config
+```
+
+Local doctor checks configuration and the local ping without connecting to a
+remote host. `--remote` explicitly opens a bounded, noninteractive BatchMode SSH
+session and sends a framed protocol ping to the *existing* remote socket. It
+requires remote `python3`. Diagnostic SSH disables forwarding, connection sharing
+and local commands: it does not create a socket, change a master or repair the
+bridge. The returned process-instance identity must match the expected local
+client, detecting sockets forwarded to another desktop. Both endpoints must run
+the current client protocol; upgrade/restart a legacy client first.
+
+Exit statuses: 0 healthy, 1 local configuration/client prerequisite failed,
+2 diagnostic SSH transport failure/timeout, 3 remote ping/execution/protocol
+failure, 4 wrong desktop/client instance. Failures suggest the next action without
+printing remote request payloads or SSH stderr. If the local client restarts
+during doctor, rerun the diagnostic to obtain a fresh identity comparison.

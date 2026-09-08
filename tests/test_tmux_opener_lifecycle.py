@@ -94,3 +94,15 @@ def test_service_preview_does_not_create_state(tmp_path: Path, monkeypatch, back
     ])
     args.func(args)
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("frame", [
+    b'{"ok":1,"client":"tmux-opener-client","version":1}\n',
+    b'{"ok":true,"client":"another-client","version":1}\n',
+    b'{"ok":true,"client":"tmux-opener-client","version":true}\n',
+    b'{"ok":true,"client":"tmux-opener-client","version":1}',
+])
+def test_diagnostics_reject_untrustworthy_ping_frames(frame: bytes) -> None:
+    wrapper = runpy.run_path(str(ROOT / "bin" / "tmux-opener"))
+    with pytest.raises(ValueError):
+        wrapper["parse_ping_response"](frame)

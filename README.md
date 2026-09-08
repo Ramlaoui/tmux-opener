@@ -168,9 +168,17 @@ Useful commands:
 
 ```sh
 tmux-opener doctor HOST
+tmux-opener doctor HOST --remote
 tmux-opener status HOST
 tmux-opener restart-client HOST
 ```
+
+For automatic client recovery after an unexpected exit, explicitly install the
+native user service with `tmux-opener install-service HOST`. See
+[client lifecycle and supervision](docs/client-artifact.md#optional-native-supervision)
+for preview, configuration and uninstall commands. Restart only the affected
+client; deleting socket files or terminating a shared SSH master is not normal
+recovery.
 
 Logs:
 
@@ -187,12 +195,11 @@ Normal client logs identify actions without recording request targets. `--verbos
 command logging: URLs, query tokens, remote paths, and SSH diagnostics may appear.
 Treat verbose logs as private and redact them before sharing.
 
-Preview launches without opening apps (add `--verbose` to inspect full commands):
+Run an isolated preview listener without opening apps (not the live bridge):
 
 ```sh
-pkill -f tmux-opener-client || true
 tmux-opener-client \
-  --socket ~/.local/state/tmux-opener/HOST.sock \
+  --socket ~/.local/state/tmux-opener/preview.sock \
   --default-ssh-host HOST \
   --allow-ssh-host HOST \
   --localhost-forward-start-port 18000 \
@@ -200,13 +207,6 @@ tmux-opener-client \
   --dry-run
 ```
 
-Include full request payloads in the local log:
-
-```sh
-pkill -f tmux-opener-client || true
-tmux-opener ssh --client-verbose HOST
-tail -f ~/.local/state/tmux-opener/HOST.log
-```
 
 ## Development
 

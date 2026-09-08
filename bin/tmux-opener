@@ -12,7 +12,7 @@ import os
 import platform
 import plistlib
 import shlex
-import shutil
+import selectors
 import signal
 import socket
 import stat
@@ -94,7 +94,7 @@ def remote_socket_path(user: str | None = None) -> str:
 
 def ssh_query(host: str, config_path: Path | None = None) -> dict[str, list[str]]:
     command = ["ssh", "-G"]
-    if config_path is not None and config_path.exists():
+    if config_path is not None and config_path != default_ssh_config():
         command.extend(["-F", str(config_path)])
     command.append(host)
 
@@ -104,6 +104,7 @@ def ssh_query(host: str, config_path: Path | None = None) -> dict[str, list[str]
         stderr=subprocess.PIPE,
         text=True,
         check=False,
+        timeout=5,
     )
     if result.returncode != 0:
         raise SystemExit(result.stderr.strip() or f"ssh -G {host} failed")
@@ -278,23 +279,50 @@ def ping_client(socket_path: Path, timeout: float = 0.2) -> bool:
     return bool(response and response.get("ok"))
 
 
-def client_ping_response(socket_path: Path, timeout: float = 0.2) -> tuple[dict[str, object] | None, str | None]:
+MAX_PING_BYTES = 1024 * 1024
+
+
+def parse_ping_response(frame: bytes, *, allow_legacy: bool = False) -> dict[str, object]:
+    if len(frame) > MAX_PING_BYTES or not frame.endswith(b"\n"):
+        raise ValueError("ping response must be a bounded newline-delimited frame")
+    try:
+        parsed = json.loads(frame)
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
+        raise ValueError("invalid ping JSON") from exc
+    if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+        raise ValueError("ping did not acknowledge success")
+    if parsed.get("client") != "tmux-opener-client":
+        raise ValueError("unexpected client identity")
+    if not allow_legacy and (type(parsed.get("version")) is not int or parsed["version"] != 1):
+        raise ValueError("unsupported client protocol; restart or upgrade the local client")
+    return parsed
+
+
+def client_ping_response(
+    socket_path: Path, timeout: float = 0.2, *, allow_legacy: bool = True,
+) -> tuple[dict[str, object] | None, str | None]:
+    deadline = time.monotonic() + timeout
+    frame = bytearray()
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(timeout)
+            client.settimeout(max(0.001, deadline - time.monotonic()))
             client.connect(str(socket_path))
+            client.settimeout(max(0.001, deadline - time.monotonic()))
             client.sendall(b'{"version":1,"action":"ping"}\n')
-            response = client.recv(65536)
-    except OSError as exc:
+            while b"\n" not in frame:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError("ping deadline exceeded")
+                client.settimeout(remaining)
+                chunk = client.recv(min(65536, MAX_PING_BYTES + 1 - len(frame)))
+                if not chunk:
+                    raise ValueError("ping ended before its newline")
+                frame.extend(chunk)
+                if len(frame) > MAX_PING_BYTES:
+                    raise ValueError("ping response too large")
+        return parse_ping_response(bytes(frame).split(b"\n", 1)[0] + b"\n", allow_legacy=allow_legacy), None
+    except (OSError, ValueError) as exc:
         return None, str(exc)
-
-    try:
-        parsed = json.loads(response.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return None, f"invalid response: {exc}"
-    if not isinstance(parsed, dict):
-        return None, "invalid response: not a JSON object"
-    return parsed, None
 
 
 def client_command(
@@ -513,9 +541,10 @@ def restart_client(args: argparse.Namespace) -> None:
     with operation_lock(socket_path, args.dry_run):
         service = installed_service(socket_path)
         if service is not None:
+            previous, _error = client_ping_response(socket_path)
             start_service(service, args.dry_run, restart=True)
             if not args.dry_run:
-                wait_for_client(socket_path)
+                wait_for_client(socket_path, previous)
             return
         stop_client(socket_path, args.dry_run)
         start_client(
@@ -539,7 +568,7 @@ def read_text_if_exists(path: Path) -> str:
 def ssh_query_or_error(host: str, config_path: Path) -> tuple[dict[str, list[str]], str | None]:
     try:
         return ssh_query(host, config_path), None
-    except SystemExit as exc:
+    except (SystemExit, OSError, subprocess.TimeoutExpired) as exc:
         return {}, str(exc)
 
 
@@ -608,7 +637,96 @@ def print_remote_localhost_forwards(ping_response: dict[str, object], label: str
         print(f"  {ssh_host} {remote_host}:{remote_port} -> 127.0.0.1:{local_port}")
 
 
-def doctor(args: argparse.Namespace) -> None:
+REMOTE_PING_CODE = r"""
+import json, socket, sys, time
+deadline = time.monotonic() + 3
+frame = bytearray()
+try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
+        peer.settimeout(max(0.001, deadline - time.monotonic()))
+        peer.connect(sys.argv[1])
+        peer.settimeout(max(0.001, deadline - time.monotonic()))
+        peer.sendall(b'{"version":1,"action":"ping"}\n')
+        while b"\n" not in frame:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError()
+            peer.settimeout(remaining)
+            chunk = peer.recv(min(65536, 1048577 - len(frame)))
+            if not chunk:
+                raise ValueError()
+            frame.extend(chunk)
+            if len(frame) > 1048576:
+                raise ValueError()
+    frame = bytes(frame).split(b"\n", 1)[0]
+    response = json.loads(frame)
+    if not isinstance(response, dict) or response.get("ok") is not True:
+        raise ValueError()
+    if response.get("client") != "tmux-opener-client" or type(response.get("version")) is not int or response["version"] != 1:
+        raise ValueError()
+    sys.stdout.buffer.write(frame + b"\n")
+except (OSError, ValueError, RecursionError):
+    sys.exit(3)
+"""
+
+
+def remote_ping_response(
+    host: str, config_path: Path, remote_socket: str,
+) -> tuple[dict[str, object] | None, int, str | None]:
+    command = ["ssh"]
+    if config_path != default_ssh_config():
+        command.extend(["-F", str(config_path)])
+    command.extend([
+        "-oBatchMode=yes", "-oClearAllForwardings=yes", "-oControlMaster=no",
+        "-oControlPath=none", "-oControlPersist=no", "-oConnectTimeout=5",
+        "-oConnectionAttempts=1", "-oPermitLocalCommand=no", "-oRemoteCommand=none",
+        "-oForkAfterAuthentication=no", "-oSessionType=default", "-oForwardAgent=no",
+        "-oForwardX11=no", "-T", "--",
+        host, shlex.join(["python3", "-c", REMOTE_PING_CODE, remote_socket]),
+    ])
+    deadline = time.monotonic() + 10
+    frame = bytearray()
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None, 2, "cannot launch diagnostic SSH; check that ssh is installed"
+    try:
+        assert process.stdout is not None
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    return None, 2, "diagnostic SSH deadline exceeded; check authentication and connectivity"
+                chunk = os.read(process.stdout.fileno(), min(65536, MAX_PING_BYTES + 1 - len(frame)))
+                if not chunk:
+                    break
+                frame.extend(chunk)
+                if len(frame) > MAX_PING_BYTES:
+                    return None, 3, "remote ping exceeded the response limit"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, 2, "diagnostic SSH deadline exceeded"
+        code = process.wait(timeout=remaining)
+        if code == 255:
+            return None, 2, "SSH transport failed; check BatchMode authentication, host key trust and connectivity"
+        if code != 0:
+            return None, 3, "remote ping failed; check remote python3 and the existing forwarded socket"
+        try:
+            return parse_ping_response(bytes(frame)), 0, None
+        except ValueError as exc:
+            return None, 3, str(exc)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, 2, "diagnostic SSH failed or timed out"
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def doctor(args: argparse.Namespace) -> int:
     host = infer_host(args)
     socket_path = local_socket_path(args, host)
     config_path = Path(args.ssh_config).expanduser()
@@ -619,7 +737,7 @@ def doctor(args: argparse.Namespace) -> None:
     values, ssh_error = ssh_query_or_error(host, config_path)
     remoteforwards = values.get("remoteforward", [])
     remote_forward_ok = has_expected_remote_forward(values, socket_path)
-    ping_response, ping_error = client_ping_response(socket_path)
+    ping_response, ping_error = client_ping_response(socket_path, allow_legacy=False)
     client_ok = bool(ping_response and ping_response.get("ok"))
     user = values.get("user", [None])[0]
     remote_socket = remote_socket_path(user)
@@ -658,6 +776,27 @@ def doctor(args: argparse.Namespace) -> None:
             ssh_error,
         )
     )
+    local_ok = bool(include_present and snippet_status == "ok" and remote_forward_ok and client_ok and not ssh_error)
+    if not args.remote:
+        print("remote round-trip: not requested (use --remote to check the existing bridge)")
+        return 0 if local_ok else 1
+    if not user or ssh_error:
+        print("remote round-trip: skipped; fix local SSH configuration first")
+        return 1
+    if not ping_response or not isinstance(ping_response.get("instance_id"), str) or not ping_response["instance_id"]:
+        print("remote round-trip: skipped; upgrade/start the expected local client to obtain its instance identity")
+        return 1
+    remote_response, code, error = remote_ping_response(host, config_path, remote_socket)
+    if error:
+        print(f"remote {'transport' if code == 2 else 'ping'}: failed ({error})")
+        print("next: inspect the existing SSH bridge; this diagnostic does not create or repair forwards")
+        return code
+    if remote_response is None or remote_response.get("instance_id") != ping_response["instance_id"]:
+        print("remote ping: wrong desktop/client instance")
+        print("next: reconnect the bridge from the intended desktop; the existing remote socket routes elsewhere")
+        return 4
+    print("remote round-trip: ok (same Local Opener Client instance)")
+    return 0 if local_ok else 1
 
 
 def status(args: argparse.Namespace) -> None:
@@ -745,10 +884,15 @@ def disable_service(spec: tuple[str, Path, str], dry_run: bool) -> None:
         supervisor_command(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], dry_run)
 
 
-def wait_for_client(socket_path: Path) -> None:
+def wait_for_client(socket_path: Path, previous: dict[str, object] | None = None) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        if ping_client(socket_path):
+        response, _error = client_ping_response(socket_path)
+        changed = previous is None or (
+            response is not None
+            and (response.get("instance_id"), response.get("pid")) != (previous.get("instance_id"), previous.get("pid"))
+        )
+        if response and response.get("ok") is True and changed:
             return
         time.sleep(0.05)
     raise SystemExit(f"tmux-opener: supervised client did not become ready; inspect {socket_path.with_suffix('.log')}")
@@ -914,6 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--state-dir", default=default_state_dir())
     doctor_parser.add_argument("--ssh-config", default=default_ssh_config())
     doctor_parser.add_argument("--snippet-dir", default=default_snippet_dir())
+    doctor_parser.add_argument("--remote", action="store_true", help="ping the existing remote bridge using noninteractive SSH")
     doctor_parser.set_defaults(func=doctor)
 
     status_parser = subcommands.add_parser("status", help="show terse local client status for a host")
