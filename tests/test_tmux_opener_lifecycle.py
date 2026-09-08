@@ -81,3 +81,16 @@ def test_stale_socket_can_be_reclaimed(tmp_path: Path) -> None:
     finally:
         server.cleanup()
     assert not path.exists()
+
+
+@pytest.mark.parametrize("backend", ["--launchd", "--systemd-user"])
+def test_service_preview_does_not_create_state(tmp_path: Path, monkeypatch, backend: str) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    wrapper = runpy.run_path(str(ROOT / "bin" / "tmux-opener"))
+    args = wrapper["build_parser"]().parse_args([
+        "install-service", "example", backend, "--dry-run",
+        "--socket", str(tmp_path / "state with spaces" / "client.sock"),
+        "--ssh-config", str(tmp_path / "custom config"),
+    ])
+    args.func(args)
+    assert list(tmp_path.iterdir()) == []

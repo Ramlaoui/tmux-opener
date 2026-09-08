@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import os
+import platform
+import plistlib
 import shlex
 import shutil
 import signal
@@ -300,6 +303,7 @@ def client_command(
     client_verbose: bool = False,
     vscode_folder_window: str = "new",
     vscode_file_window: str = "new",
+    ssh_config: Path | None = None,
 ) -> list[str]:
     command = [
         str(CLIENT),
@@ -316,6 +320,8 @@ def client_command(
     ]
     if client_verbose:
         command.append("--verbose")
+    if ssh_config is not None and ssh_config != default_ssh_config():
+        command.extend(["--ssh-config", str(ssh_config.expanduser().absolute())])
     return command
 
 
@@ -326,9 +332,10 @@ def start_client(
     dry_run: bool = False,
     vscode_folder_window: str = "new",
     vscode_file_window: str = "new",
+    ssh_config: Path | None = None,
 ) -> None:
     log_path = socket_path.with_suffix(".log")
-    command = client_command(host, socket_path, client_verbose, vscode_folder_window, vscode_file_window)
+    command = client_command(host, socket_path, client_verbose, vscode_folder_window, vscode_file_window, ssh_config)
 
     if dry_run:
         print("would start local client:")
@@ -408,11 +415,17 @@ def ensure_client(args: argparse.Namespace, socket_path: Path) -> None:
         checked_socket(socket_path)
         if ping_client(socket_path):
             return
+        service = installed_service(socket_path)
+        if service is not None:
+            start_service(service, args.dry_run)
+            wait_for_client(socket_path)
+            return
         # The child, not a health timeout, decides whether a socket is stale.
         start_client(
             args.host, socket_path, args.client_verbose,
             vscode_folder_window=args.vscode_folder_window,
             vscode_file_window=args.vscode_file_window,
+            ssh_config=Path(args.ssh_config).expanduser(),
         )
 
 
@@ -498,6 +511,12 @@ def restart_client(args: argparse.Namespace) -> None:
     host = infer_host(args)
     socket_path = local_socket_path(args, host)
     with operation_lock(socket_path, args.dry_run):
+        service = installed_service(socket_path)
+        if service is not None:
+            start_service(service, args.dry_run, restart=True)
+            if not args.dry_run:
+                wait_for_client(socket_path)
+            return
         stop_client(socket_path, args.dry_run)
         start_client(
             host,
@@ -506,6 +525,7 @@ def restart_client(args: argparse.Namespace) -> None:
             args.dry_run,
             args.vscode_folder_window,
             args.vscode_file_window,
+            Path(args.ssh_config).expanduser(),
         )
 
 
@@ -661,41 +681,176 @@ def status(args: argparse.Namespace) -> None:
     print(f"expected default/allowed SSH host: {host}")
 
 
-def service_unit(host: str, socket_path: Path, vscode_folder_window: str = "new", vscode_file_window: str = "new") -> str:
-    command = client_command(
-        host,
-        socket_path,
-        vscode_folder_window=vscode_folder_window,
-        vscode_file_window=vscode_file_window,
-    )
-    return "\n".join(
-        [
-            "[Unit]",
-            f"Description=tmux-opener local client for {host}",
-            "",
-            "[Service]",
-            "Type=simple",
-            "ExecStart=" + " ".join(shell_quote(part) for part in command),
-            "Restart=on-failure",
-            "",
-            "[Install]",
-            "WantedBy=default.target",
-            "",
-        ]
-    )
+def service_spec(socket_path: Path, backend: str) -> tuple[str, Path, str]:
+    key = hashlib.sha256(str(socket_path.absolute()).encode()).hexdigest()[:20]
+    label = f"org.tmux-opener.client-{key}"
+    if backend == "launchd":
+        return backend, Path.home() / "Library" / "LaunchAgents" / f"{label}.plist", label
+    return backend, Path.home() / ".config" / "systemd" / "user" / f"{label}.service", f"{label}.service"
+
+
+def installed_service(socket_path: Path) -> tuple[str, Path, str] | None:
+    for backend in ("launchd", "systemd"):
+        spec = service_spec(socket_path, backend)
+        try:
+            info = spec[1].lstat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise SystemExit(f"tmux-opener: unsafe service file: {spec[1]}")
+        return spec
+    return None
+
+
+def supervisor_command(command: list[str], dry_run: bool = False) -> None:
+    if dry_run:
+        print("would run: " + shlex.join(command))
+        return
+    try:
+        subprocess.run(command, check=True, timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"tmux-opener: supervisor command failed: {shlex.join(command)} ({exc})") from exc
+
+
+def launchd_loaded(label: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise SystemExit(f"tmux-opener: cannot query launchd: {exc}") from exc
+    return result.returncode == 0
+
+
+def start_service(spec: tuple[str, Path, str], dry_run: bool, restart: bool = False) -> None:
+    backend, path, label = spec
+    if backend == "systemd":
+        supervisor_command(["systemctl", "--user", "restart" if restart else "start", label], dry_run)
+    else:
+        domain = f"gui/{os.getuid()}"
+        if dry_run or not launchd_loaded(label):
+            supervisor_command(["launchctl", "bootstrap", domain, str(path)], dry_run)
+        if restart:
+            supervisor_command(["launchctl", "kickstart", "-k", f"{domain}/{label}"], dry_run)
+        else:
+            supervisor_command(["launchctl", "kickstart", f"{domain}/{label}"], dry_run)
+
+
+def disable_service(spec: tuple[str, Path, str], dry_run: bool) -> None:
+    backend, path, label = spec
+    if backend == "systemd":
+        supervisor_command(["systemctl", "--user", "disable", "--now", label], dry_run)
+    elif dry_run or launchd_loaded(label):
+        supervisor_command(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)], dry_run)
+
+
+def wait_for_client(socket_path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if ping_client(socket_path):
+            return
+        time.sleep(0.05)
+    raise SystemExit(f"tmux-opener: supervised client did not become ready; inspect {socket_path.with_suffix('.log')}")
+
+
+def systemd_quote(value: str, *, argument: bool = True) -> str:
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise SystemExit("tmux-opener: control characters are not supported in service arguments")
+    value = value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%")
+    if argument:
+        value = value.replace("$", "$$")
+    return '"' + value + '"'
+
+
+def service_content(args: argparse.Namespace, host: str, socket_path: Path, backend: str) -> str:
+    command = [sys.executable, *client_command(
+        host, socket_path, args.client_verbose, args.vscode_folder_window,
+        args.vscode_file_window, Path(args.ssh_config).expanduser(),
+    )]
+    log_path = socket_path.with_suffix(".log")
+    if backend == "launchd":
+        return plistlib.dumps({
+            "Label": service_spec(socket_path, backend)[2],
+            "ProgramArguments": command,
+            "RunAtLoad": True,
+            "KeepAlive": True,
+            "ThrottleInterval": 3,
+            "Umask": 0o077,
+            "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            "StandardOutPath": str(log_path),
+            "StandardErrorPath": str(log_path),
+        }).decode()
+    return "\n".join([
+        "[Unit]", "Description=tmux-opener Local Opener Client", "",
+        "[Service]", "Type=simple", "UMask=0077",
+        "ExecStart=" + " ".join(systemd_quote(part) for part in command),
+        "StandardOutput=append:" + str(log_path).replace("%", "%%"),
+        "Environment=" + systemd_quote("PATH=" + os.environ.get("PATH", "/usr/bin:/bin"), argument=False),
+        "StandardError=inherit", "Restart=always", "RestartSec=3", "",
+        "[Install]", "WantedBy=default.target", "",
+    ])
+
+
+def selected_backend(args: argparse.Namespace) -> str:
+    if args.systemd_user:
+        return "systemd"
+    if args.launchd:
+        return "launchd"
+    if platform.system() == "Darwin":
+        return "launchd"
+    if platform.system() == "Linux":
+        return "systemd"
+    raise SystemExit("tmux-opener: native services require macOS or Linux")
 
 
 def install_service(args: argparse.Namespace) -> None:
-    if not args.systemd_user:
-        raise SystemExit("tmux-opener: install-service currently requires --systemd-user")
-    if not args.dry_run:
-        raise SystemExit("tmux-opener: install-service is safe by default; pass --dry-run to print the unit")
-
     host = infer_host(args)
-    socket_path = local_socket_path(args, host)
-    print(f"# user systemd unit for tmux-opener host {host}")
-    print(f"# suggested path: ~/.config/systemd/user/tmux-opener-{host}.service")
-    print(service_unit(host, socket_path, args.vscode_folder_window, args.vscode_file_window), end="")
+    socket_path = local_socket_path(args, host).absolute()
+    backend = selected_backend(args)
+    spec = service_spec(socket_path, backend)
+    content = service_content(args, host, socket_path, backend)
+    with operation_lock(socket_path, args.dry_run):
+        previous = installed_service(socket_path)
+        if previous is not None:
+            if previous[0] != backend:
+                raise SystemExit("tmux-opener: uninstall the existing service before changing supervisors")
+            disable_service(previous, args.dry_run)
+        stop_client(socket_path, args.dry_run)
+        if args.dry_run:
+            print(f"would write {spec[1]} (mode 0600):\n{content}")
+        else:
+            spec[1].parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = open_private_file(spec[1])
+            with os.fdopen(fd, "w") as config:
+                config.truncate()
+                config.write(content)
+            os.close(open_private_file(socket_path.with_suffix(".log"), os.O_WRONLY | os.O_APPEND))
+        if backend == "systemd":
+            supervisor_command(["systemctl", "--user", "daemon-reload"], args.dry_run)
+            supervisor_command(["systemctl", "--user", "enable", "--now", spec[2]], args.dry_run)
+        else:
+            start_service(spec, args.dry_run)
+        if not args.dry_run:
+            wait_for_client(socket_path)
+
+
+def uninstall_service(args: argparse.Namespace) -> None:
+    host = infer_host(args)
+    socket_path = local_socket_path(args, host).absolute()
+    with operation_lock(socket_path, args.dry_run):
+        spec = installed_service(socket_path)
+        if spec is None:
+            print("no installed service for this socket")
+            return
+        disable_service(spec, args.dry_run)
+        stop_client(socket_path, args.dry_run)
+        if args.dry_run:
+            print(f"would remove {spec[1]}")
+        else:
+            spec[1].unlink()
+        if spec[0] == "systemd":
+            supervisor_command(["systemctl", "--user", "daemon-reload"], args.dry_run)
 
 
 def run_ssh(args: argparse.Namespace) -> int:
@@ -773,22 +928,28 @@ def build_parser() -> argparse.ArgumentParser:
     restart.add_argument("--socket")
     restart.add_argument("--state-dir", default=default_state_dir())
     restart.add_argument("--snippet-dir", default=default_snippet_dir())
+    restart.add_argument("--ssh-config", default=default_ssh_config())
     restart.add_argument("--dry-run", action="store_true")
     restart.add_argument("--client-verbose", action="store_true", help="start the local client with full request-payload logging")
     restart.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
     restart.add_argument("--vscode-file-window", choices=("new", "reuse"), default="new")
     restart.set_defaults(func=restart_client)
 
-    service = subcommands.add_parser("install-service", help="print a local client service unit")
-    service.add_argument("host", nargs="?")
-    service.add_argument("--socket")
-    service.add_argument("--state-dir", default=default_state_dir())
-    service.add_argument("--snippet-dir", default=default_snippet_dir())
-    service.add_argument("--systemd-user", action="store_true")
-    service.add_argument("--dry-run", action="store_true")
-    service.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
-    service.add_argument("--vscode-file-window", choices=("new", "reuse"), default="new")
-    service.set_defaults(func=install_service)
+    for name, handler in (("install-service", install_service), ("uninstall-service", uninstall_service)):
+        service = subcommands.add_parser(name, help="manage the native desktop client service")
+        service.add_argument("host", nargs="?")
+        service.add_argument("--socket")
+        service.add_argument("--state-dir", default=default_state_dir())
+        service.add_argument("--snippet-dir", default=default_snippet_dir())
+        service.add_argument("--ssh-config", default=default_ssh_config())
+        backend = service.add_mutually_exclusive_group()
+        backend.add_argument("--systemd-user", action="store_true")
+        backend.add_argument("--launchd", action="store_true")
+        service.add_argument("--dry-run", action="store_true")
+        service.add_argument("--client-verbose", action="store_true")
+        service.add_argument("--vscode-folder-window", choices=("new", "reuse"), default="new")
+        service.add_argument("--vscode-file-window", choices=("new", "reuse"), default="new")
+        service.set_defaults(func=handler)
 
     return parser
 
