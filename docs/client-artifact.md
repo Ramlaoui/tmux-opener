@@ -59,3 +59,31 @@ Symlinks, ordinary files and foreign sockets are rejected. Shutdown only removes
 the socket inode this client bound, so an old client cannot unlink a replacement.
 Keep socket directories private; ownership and operation lock files are persistent
 coordination objects and must not be removed while any client or wrapper runs.
+
+## Optional native supervision
+
+Service installation is explicit, never a side effect of connecting:
+
+```sh
+tmux-opener install-service HOST --dry-run
+tmux-opener install-service HOST --ssh-config /path/to/ssh-config --vscode-file-window reuse
+tmux-opener restart-client HOST
+tmux-opener uninstall-service HOST
+```
+
+The default is a launchd LaunchAgent on macOS and a systemd user service on Linux.
+`--launchd` and `--systemd-user` select a backend explicitly (also useful to preview
+either format). Installation writes a mode-0600 configuration and log, starts the
+service with `launchctl bootstrap` or `systemctl --user enable --now`, and checks
+client readiness. It requires an active GUI login/user service manager; no root,
+system service or Linux lingering is configured. The captured PATH allows desktop
+editor discovery. Host allowlisting, editor window settings and custom SSH config
+are preserved; rerun installation to change installed options.
+
+`restart-client` and automatic ensure use the installed supervisor, never a second
+detached launcher. Reinstallation/uninstallation stops supervision before stopping
+the owner, preventing restart races. Uninstallation removes only the service
+configuration; SSH snippets, logs and coordination locks remain. Service names are
+derived from the absolute socket path, so use the same `--socket`/`--state-dir` when
+managing a custom installation. An unresponsive owner is never replaced on a
+health timeout; inspect the native service manager and log before retrying.
