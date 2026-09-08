@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import errno
+import fcntl
 import json
 import os
 import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -332,8 +336,9 @@ def start_client(
         print(f"would log to: {log_path}")
         return
 
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    log = log_path.open("ab")
+    socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = open_private_file(log_path, os.O_WRONLY | os.O_APPEND)
+    log = os.fdopen(fd, "ab")
     try:
         subprocess.Popen(
             command,
@@ -345,8 +350,8 @@ def start_client(
     finally:
         log.close()
 
-    deadline = time.time() + 2.0
-    while time.time() < deadline:
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
         if ping_client(socket_path):
             return
         time.sleep(0.05)
@@ -354,101 +359,65 @@ def start_client(
     raise SystemExit(f"tmux-opener: local client did not start; see {log_path}")
 
 
+def open_private_file(path: Path, flags: int = os.O_RDWR) -> int:
+    fd = os.open(path, flags | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+        os.close(fd)
+        raise SystemExit(f"tmux-opener: unsafe state file: {path}")
+    os.fchmod(fd, 0o600)
+    return fd
+
+
+@contextmanager
+def operation_lock(socket_path: Path, dry_run: bool = False):
+    if dry_run:
+        yield
+        return
+    socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = open_private_file(Path(str(socket_path) + ".operation.lock"))
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SystemExit("tmux-opener: another lifecycle operation is still running")
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
+def checked_socket(socket_path: Path) -> os.stat_result | None:
+    try:
+        info = socket_path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
+        raise SystemExit(f"tmux-opener: refusing non-socket or foreign socket: {socket_path}")
+    return info
+
+
 def ensure_client(args: argparse.Namespace, socket_path: Path) -> None:
     if args.no_start_client or args.dry_run:
         return
-
-    if ping_client(socket_path):
-        return
-
-    try:
-        socket_path.unlink()
-    except FileNotFoundError:
-        pass
-
-    start_client(
-        args.host,
-        socket_path,
-        args.client_verbose,
-        vscode_folder_window=args.vscode_folder_window,
-        vscode_file_window=args.vscode_file_window,
-    )
-
-
-def socket_owner_pids_linux(socket_path: Path) -> list[int]:
-    proc_net_unix = Path("/proc/net/unix")
-    if not proc_net_unix.exists():
-        return []
-
-    inodes: set[str] = set()
-    socket_name = str(socket_path)
-    try:
-        for line in proc_net_unix.read_text().splitlines()[1:]:
-            fields = line.split()
-            if len(fields) >= 8 and fields[7] == socket_name:
-                inodes.add(fields[6])
-    except OSError:
-        return []
-
-    if not inodes:
-        return []
-
-    pids: set[int] = set()
-    proc = Path("/proc")
-    for fd_dir in proc.glob("[0-9]*/fd"):
-        try:
-            pid = int(fd_dir.parent.name)
-        except ValueError:
-            continue
-        if pid == os.getpid():
-            continue
-        try:
-            fds = list(fd_dir.iterdir())
-        except OSError:
-            continue
-        for fd in fds:
-            try:
-                target = os.readlink(fd)
-            except OSError:
-                continue
-            if target.startswith("socket:[") and target[8:-1] in inodes:
-                pids.add(pid)
-                break
-    return sorted(pids)
-
-
-def socket_owner_pids_lsof(socket_path: Path) -> list[int]:
-    lsof = shutil.which("lsof")
-    if lsof is None:
-        return []
-
-    result = subprocess.run(
-        [lsof, "-t", "-U", str(socket_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        check=False,
-    )
-    if result.returncode not in (0, 1):
-        return []
-
-    pids: set[int] = set()
-    for line in result.stdout.splitlines():
-        try:
-            pid = int(line.strip())
-        except ValueError:
-            continue
-        if pid != os.getpid():
-            pids.add(pid)
-    return sorted(pids)
-
-
-def socket_owner_pids(socket_path: Path) -> list[int]:
-    return socket_owner_pids_linux(socket_path) or socket_owner_pids_lsof(socket_path)
+    with operation_lock(socket_path):
+        checked_socket(socket_path)
+        if ping_client(socket_path):
+            return
+        # The child, not a health timeout, decides whether a socket is stale.
+        start_client(
+            args.host, socket_path, args.client_verbose,
+            vscode_folder_window=args.vscode_folder_window,
+            vscode_file_window=args.vscode_file_window,
+        )
 
 
 def client_pid_from_ping_response(response: dict[str, object] | None) -> int | None:
-    if not response:
+    if not response or response.get("ok") is not True or response.get("client") != "tmux-opener-client":
         return None
     pid = response.get("pid")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 or pid == os.getpid():
@@ -456,79 +425,88 @@ def client_pid_from_ping_response(response: dict[str, object] | None) -> int | N
     return pid
 
 
+def process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
 def stop_client(socket_path: Path, dry_run: bool) -> None:
-    ping_response, _ping_error = client_ping_response(socket_path)
-    if not bool(ping_response and ping_response.get("ok")):
-        if socket_path.exists():
-            if dry_run:
-                print(f"would remove stale local socket: {socket_path}")
-            else:
-                socket_path.unlink()
-        elif dry_run:
-            print(f"local client already stopped: {socket_path}")
-        return
-
-    client_pid = client_pid_from_ping_response(ping_response)
-    pids = [client_pid] if client_pid is not None else socket_owner_pids(socket_path)
-    if not pids:
-        raise SystemExit(
-            f"tmux-opener: local client answered on {socket_path}, "
-            "but its owner process could not be identified; refusing broad kill"
-        )
-
+    original = checked_socket(socket_path)
     if dry_run:
-        print(f"would stop local client pid(s): {', '.join(str(pid) for pid in pids)}")
+        print(f"would stop verified local client at: {socket_path}")
         return
-
-    for pid in pids:
+    fd = open_private_file(Path(str(socket_path) + ".lock"))
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = False
+        except BlockingIOError:
+            locked = True
+        if locked:
+            try:
+                pid = int(os.pread(fd, 64, 0))
+            except ValueError:
+                raise SystemExit("tmux-opener: client ownership is initializing; try again")
+            if pid <= 0 or pid == os.getpid():
+                raise SystemExit("tmux-opener: invalid client owner; refusing to signal")
+            response, error = client_ping_response(socket_path)
+            if client_pid_from_ping_response(response) != pid:
+                raise SystemExit(
+                    f"tmux-opener: locked client does not confirm its owner; socket preserved: {error or socket_path}"
+                )
+        else:
+            response, error = client_ping_response(socket_path)
+            pid = client_pid_from_ping_response(response)
+            if pid is None:
+                if original is None:
+                    return
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    probe.settimeout(0.2)
+                    try:
+                        probe.connect(str(socket_path))
+                    except OSError as exc:
+                        if exc.errno == errno.ECONNREFUSED:
+                            # Leave stale cleanup to the next locked bind.
+                            return
+                raise SystemExit(f"tmux-opener: cannot identify legacy listener; refusing to replace: {error or socket_path}")
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
         except PermissionError as exc:
-            if socket_path.exists():
+            raise SystemExit(f"tmux-opener: permission denied stopping client {pid}; socket preserved") from exc
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if locked:
                 try:
-                    socket_path.unlink()
-                except OSError as unlink_exc:
-                    raise SystemExit(
-                        f"tmux-opener: permission denied stopping local client pid {pid} "
-                        f"for {socket_path}: {exc}; also failed to replace socket path: {unlink_exc}"
-                    ) from unlink_exc
-                print(
-                    f"warning: permission denied stopping local client pid {pid}; "
-                    f"replaced socket path {socket_path}"
-                )
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return
+                except BlockingIOError:
+                    pass
+            elif not process_exists(pid):
                 return
-            raise SystemExit(
-                f"tmux-opener: permission denied stopping local client pid {pid} "
-                f"for {socket_path}: {exc}"
-            ) from exc
-
-    deadline = time.time() + 2.0
-    while time.time() < deadline:
-        if not ping_client(socket_path):
-            try:
-                socket_path.unlink()
-            except FileNotFoundError:
-                pass
-            return
-        time.sleep(0.05)
-
-    raise SystemExit(f"tmux-opener: local client did not stop for {socket_path}")
+            time.sleep(0.05)
+        raise SystemExit(f"tmux-opener: client {pid} did not release ownership; socket preserved")
+    finally:
+        os.close(fd)
 
 
 def restart_client(args: argparse.Namespace) -> None:
     host = infer_host(args)
     socket_path = local_socket_path(args, host)
-    stop_client(socket_path, args.dry_run)
-    start_client(
-        host,
-        socket_path,
-        args.client_verbose,
-        args.dry_run,
-        args.vscode_folder_window,
-        args.vscode_file_window,
-    )
+    with operation_lock(socket_path, args.dry_run):
+        stop_client(socket_path, args.dry_run)
+        start_client(
+            host,
+            socket_path,
+            args.client_verbose,
+            args.dry_run,
+            args.vscode_folder_window,
+            args.vscode_file_window,
+        )
 
 
 def read_text_if_exists(path: Path) -> str:

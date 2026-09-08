@@ -44,3 +44,18 @@ tmux-opener ssh --dry-run --no-start-client HOST
 The local client only accepts structured Open Requests. Remote file/editor
 requests are rejected unless the client was started for the target host, or was
 explicitly started with `--allow-ssh-host HOST`.
+
+## Safe client ownership
+
+Each client holds a lifetime lock beside its socket; wrapper lifecycle operations
+use a separate operation lock. `restart-client HOST` verifies the responding
+owner before signalling it and waits for ownership release (or legacy process
+exit), not a failed ping. A timeout or permission error preserves the socket.
+An unresponsive legacy client must be stopped by its original launcher before
+replacement; tmux-opener never searches for processes to kill.
+
+Only a refused connection to an owned Unix socket permits stale cleanup.
+Symlinks, ordinary files and foreign sockets are rejected. Shutdown only removes
+the socket inode this client bound, so an old client cannot unlink a replacement.
+Keep socket directories private; ownership and operation lock files are persistent
+coordination objects and must not be removed while any client or wrapper runs.
