@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import socket
 import sys
 import tempfile
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from tmux_opener_common import bridge_available, send_request  # noqa: E402
+from tmux_opener_common import bridge_available, deliver_request, send_request  # noqa: E402
 
 
 @contextmanager
@@ -55,3 +56,15 @@ def test_health_requires_opener_identity():
         assert not bridge_available(path, 1)
     with responder([b'{"ok":true,"client":"tmux-opener-client","version":1}\n']) as path:
         assert bridge_available(path, 1)
+
+
+@pytest.mark.parametrize("accepted", [True, False])
+def test_delivery_log_excludes_request_and_response_secrets(tmp_path, accepted):
+    secret = "synthetic-private-target"
+    request = {"version": 1, "action": "open_url", "url": f"https://example.test/?token={secret}"}
+    reply = json.dumps({"ok": accepted, "error": secret}).encode() + b"\n"
+    log = tmp_path / "sender.log"
+    with responder([reply]) as path:
+        assert deliver_request(path, request, 1, str(log), "none") == (0 if accepted else 1)
+    assert secret not in log.read_text()
+    assert log.stat().st_mode & 0o777 == 0o600

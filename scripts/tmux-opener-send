@@ -38,8 +38,8 @@ def main() -> int:
     selection = clean_selection(raw_selection)
     request = build_request(selection, args.cwd, args.ssh_host)
     if request is None:
-        log_line(log_path, f"reject: no opener target selection={selection!r}")
-        return fallback_message(None, f"no opener target for {selection!r}", args.fallback)
+        log_line(log_path, "reject: no opener target")
+        return fallback_message(None, "no opener target", args.fallback)
 
     if args.print_request:
         print(json.dumps(request, indent=2, sort_keys=True))
