@@ -80,6 +80,11 @@ system service or Linux lingering is configured. The captured PATH allows deskto
 editor discovery. Host allowlisting, editor window settings and custom SSH config
 are preserved; rerun installation to change installed options.
 
+The launchd job uses `ProcessType=Interactive` because it handles user-triggered
+desktop actions over a Unix socket, not XPC transactions. This avoids launchd's
+default background resource throttling; it does not prevent the Mac from sleeping.
+Rerun `install-service HOST` to update an existing job's configuration.
+
 `restart-client` and automatic ensure use the installed supervisor, never a second
 detached launcher. Reinstallation/uninstallation stops supervision before stopping
 the owner, preventing restart races. Uninstallation removes only the service
@@ -96,7 +101,11 @@ tmux-opener doctor HOST --remote --ssh-config /path/to/ssh-config
 ```
 
 Local doctor checks configuration and the local ping without connecting to a
-remote host. `--remote` explicitly opens a bounded, noninteractive BatchMode SSH
+remote host. Local health checks allow three seconds for a complete reply rather
+than treating a brief scheduling delay as a dead client. Startup/readiness polling
+remains bounded by its enclosing deadline.
+
+`--remote` explicitly opens a bounded, noninteractive BatchMode SSH
 session and sends a framed protocol ping to the *existing* remote socket. It
 requires remote `python3`. Diagnostic SSH disables forwarding, connection sharing
 and local commands: it does not create a socket, change a master or repair the

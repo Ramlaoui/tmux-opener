@@ -274,7 +274,10 @@ def uninstall_host(args: argparse.Namespace) -> None:
     remove_ssh_include_if_unused(config_path, snippet_dir, args.dry_run)
 
 
-def ping_client(socket_path: Path, timeout: float = 0.2) -> bool:
+LOCAL_PING_TIMEOUT = 3.0
+
+
+def ping_client(socket_path: Path, timeout: float = LOCAL_PING_TIMEOUT) -> bool:
     response, _error = client_ping_response(socket_path, timeout)
     return bool(response and response.get("ok"))
 
@@ -299,7 +302,7 @@ def parse_ping_response(frame: bytes, *, allow_legacy: bool = False) -> dict[str
 
 
 def client_ping_response(
-    socket_path: Path, timeout: float = 0.2, *, allow_legacy: bool = True,
+    socket_path: Path, timeout: float = LOCAL_PING_TIMEOUT, *, allow_legacy: bool = True,
 ) -> tuple[dict[str, object] | None, str | None]:
     deadline = time.monotonic() + timeout
     frame = bytearray()
@@ -387,7 +390,7 @@ def start_client(
 
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        if ping_client(socket_path):
+        if ping_client(socket_path, timeout=max(0.001, deadline - time.monotonic())):
             return
         time.sleep(0.05)
 
@@ -887,7 +890,9 @@ def disable_service(spec: tuple[str, Path, str], dry_run: bool) -> None:
 def wait_for_client(socket_path: Path, previous: dict[str, object] | None = None) -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        response, _error = client_ping_response(socket_path)
+        response, _error = client_ping_response(
+            socket_path, timeout=max(0.001, deadline - time.monotonic()),
+        )
         changed = previous is None or (
             response is not None
             and (response.get("instance_id"), response.get("pid")) != (previous.get("instance_id"), previous.get("pid"))
@@ -919,6 +924,7 @@ def service_content(args: argparse.Namespace, host: str, socket_path: Path, back
             "ProgramArguments": command,
             "RunAtLoad": True,
             "KeepAlive": True,
+            "ProcessType": "Interactive",
             "ThrottleInterval": 3,
             "Umask": 0o077,
             "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
