@@ -217,7 +217,7 @@ def main() -> int:
         log_line(log_path, f"bridge skipped: policy={args.bridge_policy}; using fallback={args.fallback}")
         return run_fallback(args, selection, log_path)
 
-    if not bridge_available(args.socket, min(args.timeout, 0.75)):
+    if not bridge_available(args.socket, args.timeout):
         log_line(log_path, f"bridge unavailable: socket={args.socket}; using fallback={args.fallback}")
         return run_fallback(args, selection, log_path)
 
