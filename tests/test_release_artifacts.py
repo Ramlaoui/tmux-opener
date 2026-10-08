@@ -173,6 +173,8 @@ def test_server_archive_contents(tmp_path: Path) -> None:
         "tmux-opener/scripts/tmux-opener-pick",
         "tmux-opener/scripts/tmux-opener-send",
         "tmux-opener/scripts/tmux_opener_common.py",
+        "tmux-opener/integration",
+        "tmux-opener/integration/vimtex.lua",
     }
 
 

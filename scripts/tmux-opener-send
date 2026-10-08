@@ -7,9 +7,11 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from tmux_opener_common import (
     build_request,
+    bridge_available,
     clean_selection,
     default_log_path,
     default_socket_path,
@@ -17,6 +19,7 @@ from tmux_opener_common import (
     deliver_request,
     fallback_message,
     log_line,
+    send_request,
 )
 
 
@@ -26,7 +29,10 @@ def main() -> int:
     parser.add_argument("--socket", default=default_socket_path(), help="remote forwarded Unix socket path")
     parser.add_argument("--cwd", default=os.environ.get("TMUX_OPENER_CWD") or os.getcwd())
     parser.add_argument("--ssh-host", default=default_ssh_host())
-    parser.add_argument("--timeout", type=float, default=5.0, help="request deadline in seconds")
+    parser.add_argument("--timeout", type=float, help="request deadline in seconds (PDF: 30, other: 5)")
+    parser.add_argument("--pdf", action="store_true", help="open a remote PDF in the local desktop viewer")
+    parser.add_argument("--refresh", action="store_true", help="update an already opened PDF without opening a window")
+    parser.add_argument("--check-bridge", action="store_true", help="exit successfully if the local bridge responds")
     parser.add_argument("--fallback", choices=("auto", "message", "osc8", "none"), default="auto")
     parser.add_argument("--log", default=default_log_path(), help="remote sender log path")
     parser.add_argument("--no-log", action="store_true", help="disable remote sender logging")
@@ -34,9 +40,30 @@ def main() -> int:
     args = parser.parse_args()
     log_path = None if args.no_log else args.log
 
+    if args.check_bridge:
+        if args.pdf:
+            try:
+                response = send_request(args.socket, {"version": 1, "action": "ping"}, args.timeout or 0.5)
+            except (OSError, ValueError):
+                return 1
+            return 0 if response.get("ok") and "remote_pdf" in response.get("capabilities", []) else 1
+        return 0 if bridge_available(args.socket, args.timeout or 0.5) else 1
+    if args.refresh and not args.pdf:
+        parser.error("--refresh requires --pdf")
+
     raw_selection = args.selection if args.selection is not None else sys.stdin.read()
     selection = clean_selection(raw_selection)
-    request = build_request(selection, args.cwd, args.ssh_host)
+    if args.pdf:
+        path = Path(selection).expanduser()
+        if not path.is_absolute():
+            path = Path(args.cwd) / path
+        if path.suffix.lower() != ".pdf" or not path.is_file():
+            parser.error("--pdf requires an existing PDF file")
+        request = {"version": 1, "action": "open_remote_pdf", "path": str(path.resolve()), "refresh": args.refresh}
+        if args.ssh_host:
+            request["ssh_host"] = args.ssh_host
+    else:
+        request = build_request(selection, args.cwd, args.ssh_host)
     if request is None:
         log_line(log_path, "reject: no opener target")
         return fallback_message(None, "no opener target", args.fallback)
@@ -45,7 +72,8 @@ def main() -> int:
         print(json.dumps(request, indent=2, sort_keys=True))
         return 0
 
-    return deliver_request(args.socket, request, args.timeout, log_path, args.fallback)
+    timeout = args.timeout if args.timeout is not None else (30.0 if args.pdf else 5.0)
+    return deliver_request(args.socket, request, timeout, log_path, "none" if args.pdf else args.fallback)
 
 
 if __name__ == "__main__":

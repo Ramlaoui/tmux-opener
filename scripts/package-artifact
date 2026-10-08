@@ -49,6 +49,7 @@ case "${kind}" in
       "scripts/tmux-opener-pick"
       "scripts/tmux-opener-send"
       "scripts/tmux_opener_common.py"
+      "integration/vimtex.lua"
     )
     executable_files=(
       "tmux-opener.tmux"
