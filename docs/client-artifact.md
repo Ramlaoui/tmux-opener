@@ -55,13 +55,34 @@ builds. Refresh requests never reopen or focus the viewer; transfer failures
 preserve the previous PDF. SSH aliases and custom SSH configuration still apply.
 
 The default viewer is Zathura on Linux when installed, Skim on macOS when installed,
-or the system PDF handler. The viewer must support automatic file reloading; enable
-that preference in Skim. `--pdf-viewer` or `TMUX_OPENER_PDF_VIEWER` can select
+or the system PDF handler. Skim receives an explicit reload for the matching open
+document after every refresh, without activating the app or opening another window.
+Disable Skim's own "Check for file changes" in its Sync preferences when using this
+scripted reload, as recommended by [Skim's synchronization documentation](https://sourceforge.net/p/skim-app/wiki/TeX_and_PDF_Synchronization/).
+Unsaved Skim notes are preserved; save them before refreshing. macOS may ask for
+Automation permission for the client to control Skim. Other viewers must support
+automatic file reloading. `--pdf-viewer` or `TMUX_OPENER_PDF_VIEWER` can select
 `auto`, `zathura`, `skim`, or `system`. Restart the desktop client after updating:
 
 ```sh
 tmux-opener restart-client HOST
 ```
+
+For a client started by the SSH wrapper without native service supervision, select
+the desktop's default PDF application with:
+
+```sh
+TMUX_OPENER_PDF_VIEWER=system tmux-opener restart-client HOST
+```
+
+The client reads the preference at startup. For an existing native service, update
+its saved command with the same preference:
+
+```sh
+TMUX_OPENER_PDF_VIEWER=system tmux-opener install-service HOST
+```
+
+The service stores the viewer argument, so the choice survives service restarts.
 
 ## Safe client ownership
 

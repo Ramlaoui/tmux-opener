@@ -351,6 +351,8 @@ def client_command(
     ]
     if client_verbose:
         command.append("--verbose")
+    if viewer := os.environ.get("TMUX_OPENER_PDF_VIEWER"):
+        command.extend(["--pdf-viewer", viewer])
     if ssh_config is not None and ssh_config != default_ssh_config():
         command.extend(["--ssh-config", str(ssh_config.expanduser().absolute())])
     return command
