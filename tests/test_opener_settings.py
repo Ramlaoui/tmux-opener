@@ -146,3 +146,19 @@ def test_preview_download_refreshes_a_private_cache_copy(client: dict[str, Any],
     assert destination.parent.parent == tmp_path / "cache" / "tmux-opener" / "preview"
     assert destination.parent.stat().st_mode & 0o777 == 0o700
     assert notified == []
+
+
+def test_inline_rule_answers_only_senders_that_can_show_popups(client: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    args = client_args()
+    client["dispatch"]({"version": 1, "action": "set_settings", "settings": {"rules": [{"pattern": "*.log", "opener": "tmux"}]}}, args)
+    opened: list[str] = []
+    monkeypatch.setitem(client["dispatch"].__globals__, "open_vscode_remote",
+                        lambda request, *_args, **_policy: opened.append(request["path"]))
+
+    assert client["dispatch"]({**open_request("/work/train.log"), "inline": True}, args) == {"opener": "tmux"}
+    assert opened == []
+    # Older senders, VimTeX and folders cannot show a popup and keep VS Code.
+    assert client["dispatch"](open_request("/work/train.log"), args) is None
+    client["dispatch"]({**open_request("/work/logs.log", "folder"), "inline": True}, args)
+    assert opened == ["/work/train.log", "/work/logs.log"]
+    assert args.download_queue.jobs == []

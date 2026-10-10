@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -582,6 +583,7 @@ def deliver_request(
     timeout: float,
     log_path: str | None,
     fallback: str,
+    on_ack: Callable[[dict[str, object]], int] | None = None,
 ) -> int:
     try:
         response = send_request(socket_path, request, timeout)
@@ -598,4 +600,22 @@ def deliver_request(
         return fallback_message(request, str(error), fallback)
 
     log_line(log_path, f"send ok: socket={socket_path} {describe_request(request)}")
-    return 0
+    return on_ack(response) if on_ack else 0
+
+
+def show_inline(path: str, line: object, cwd: str) -> int:
+    """Show a file in this terminal when interactive, otherwise in a tmux popup."""
+
+    command = [str(Path(__file__).resolve().with_name("tmux-opener-view")), path]
+    if type(line) is int:
+        command += ["--line", str(line)]
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return subprocess.run(command, check=False).returncode
+    # The viewer reports its own errors, so a failed popup means tmux cannot show one.
+    shell_command = shlex.join(command) + " || true"
+    popup = subprocess.run(["tmux", "display-popup", "-E", "-w", "90%", "-h", "90%", "-d", cwd, shell_command],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    if popup.returncode:  # tmux before 3.2 has no popups
+        popup = subprocess.run(["tmux", "new-window", "-c", cwd, "-n", Path(path).name or "view", shell_command],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    return popup.returncode

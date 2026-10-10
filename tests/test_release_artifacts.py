@@ -119,6 +119,7 @@ def test_python_entrypoints_compile() -> None:
         "scripts/tmux-opener-pick",
         "scripts/tmux-opener-send",
         "scripts/tmux-opener-status",
+        "scripts/tmux-opener-view",
         "scripts/tmux_opener_common.py",
         "lib/tmux_opener_downloads.py",
         "lib/tmux_opener_dashboard.py",
@@ -154,10 +155,11 @@ def test_tmux_plugin_key_bindings() -> None:
         for keys in (vi_keys, emacs_keys):
             download = next(line for line in keys.splitlines() if "--download" in line)
             save_as = next(line for line in keys.splitlines() if "--save-as" in line)
+            view = next(line for line in keys.splitlines() if "--view" in line)
             assert " d " in download
             assert " D " in save_as
-            assert "copy-pipe-and-cancel" in download
-            assert "copy-pipe-and-cancel" in save_as
+            assert " i " in view
+            assert all("copy-pipe-and-cancel" in line for line in (download, save_as, view))
         assert "tmux-opener-pick" in prefix_keys
         assert "display-popup" in prefix_keys
         picker_binding = next(line for line in prefix_keys.splitlines() if "tmux-opener-pick" in line)
@@ -186,6 +188,7 @@ def test_server_archive_contents(tmp_path: Path) -> None:
         "tmux-opener/scripts/tmux-opener-pick",
         "tmux-opener/scripts/tmux-opener-send",
         "tmux-opener/scripts/tmux-opener-status",
+        "tmux-opener/scripts/tmux-opener-view",
         "tmux-opener/scripts/tmux_opener_common.py",
         "tmux-opener/integration",
         "tmux-opener/integration/vimtex.lua",

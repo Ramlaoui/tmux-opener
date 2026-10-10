@@ -42,10 +42,11 @@ client process and a recent host report do not prove an active SSH connection.
 
 **Opener Settings**:
 Desktop-owned choices for satisfying remote open requests: ordered path rules
-selecting VS Code, local preview or download, plus VS Code window and PDF viewer
-policies. They hold only fixed enum values, never commands, because a forwarded
-remote session can change them; local preview is limited to formats that cannot
-execute code when opened.
+selecting VS Code, inline, local preview or download, plus VS Code window and PDF
+viewer policies. They hold only fixed enum values, never commands, because a
+forwarded remote session can change them; local preview is limited to formats
+that cannot execute code when opened. Inline is answered back to the remote
+plugin, which shows its own file in a tmux popup; the desktop runs nothing.
 
 **Bridge Availability**:
 The runtime condition that an Open Request can cross the Local Opener Bridge for the current terminal session.

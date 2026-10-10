@@ -314,7 +314,7 @@ STATE_LOOK = {
     "interrupted": ("bad", "fail", "interrupted"),
     "cancelled": ("dim", "off", "cancelled"),
 }
-OPENER_LABELS = {"vscode": "VS Code", "preview": "Preview", "download": "Download"}
+OPENER_LABELS = {"vscode": "VS Code", "tmux": "Inline", "preview": "Preview", "download": "Download"}
 SETTING_ROWS = (
     ("vscode_file_window", "VS Code files", ("new", "reuse")),
     ("vscode_folder_window", "VS Code folders", ("new", "reuse")),
@@ -641,15 +641,16 @@ def render_openers_view(
         if opener == "preview" and isinstance(allowed, list) and suffix and suffix not in allowed:
             note = f"preview blocked for {suffix}; will fail"
         lines.append(row(index, f"{index + 1:>2}  {_clip(pattern, pattern_width - 4)}", OPENER_LABELS.get(opener, opener),
-                         {"preview": "good", "download": "info"}.get(opener, "accent"), note))
+                         {"tmux": "bold", "preview": "good", "download": "info"}.get(opener, "accent"), note))
     lines.append([("    ", ""), ("*  everything else".ljust(30), "dim"), ("  VS Code", "dim")])
     if not rules:
-        lines.append([("    press a to add a rule such as *.pdf (preview) or *.pt (download)", "dim")])
+        lines.append([("    press a to add a rule such as *.log (inline), *.pdf (preview) or *.pt (download)", "dim")])
     lines += [[], [(" WINDOWS & VIEWERS ", "label")]]
     for offset, (key, name, _choices) in enumerate(SETTING_ROWS):
         lines.append(row(len(rules) + offset, f"    {name}", _optional_text(settings.get(key))))
     lines += [[], [(f"   saved to {_optional_text(settings_state.get('path'))}", "faint")],
-              [("   Preview copies the file here and opens it locally; Download saves it to Downloads.", "faint")]]
+              [("   Inline shows the file in a popup here; Preview copies it to the desktop and opens it;", "faint")],
+              [("   Download saves it to Downloads.", "faint")]]
     lines = lines[: max(height - 1, 0)]
     return lines + [[] for _ in range(max(height - len(lines) - 1, 0))] + [_hints(OPENER_HINTS, message)]
 

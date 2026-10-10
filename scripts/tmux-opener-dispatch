@@ -26,6 +26,7 @@ from tmux_opener_common import (
     is_open_url,
     log_line,
     resolve_path,
+    show_inline,
 )
 
 
@@ -180,9 +181,10 @@ def run_fallback(args: argparse.Namespace, selection: str, log_path: str | None)
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("selection", nargs="?", help="text to open; defaults to stdin")
-    download = parser.add_mutually_exclusive_group()
-    download.add_argument("--download", action="store_true", help="download selected files to client Downloads")
-    download.add_argument("--save-as", action="store_true", help="ask where to save each file on the client")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--download", action="store_true", help="download selected files to client Downloads")
+    mode.add_argument("--save-as", action="store_true", help="ask where to save each file on the client")
+    mode.add_argument("--view", action="store_true", help="show the selected file inline without the bridge")
     parser.add_argument("--socket", default=default_socket_path(), help="remote forwarded Unix socket path")
     parser.add_argument("--cwd", default=os.environ.get("TMUX_OPENER_CWD") or os.getcwd())
     parser.add_argument("--ssh-host", default=default_ssh_host())
@@ -237,6 +239,13 @@ def main() -> int:
         route_feedback(args, f"queued {len(requests)} download(s) on client; completion appears in client notifications/log")
         return 0
 
+    if args.view:
+        request = build_request(selection, args.cwd, None)
+        if request is None or request["action"] != "open_vscode_remote":
+            tmux_message("select an existing file or folder path to view")
+            return 1
+        return show_inline(str(request["path"]), request.get("line"), args.cwd)
+
     if args.print_request:
         request = build_request(selection, args.cwd, args.ssh_host)
         if request is None:
@@ -258,10 +267,16 @@ def main() -> int:
         log_line(log_path, "reject: no opener target")
         return fallback_message(None, "no opener target", "auto")
 
-    returncode = deliver_request(args.socket, request, args.timeout, log_path, "auto")
-    if returncode == 0:
+    if request["action"] == "open_vscode_remote" and (os.environ.get("TMUX") or sys.stdout.isatty()):
+        request["inline"] = True  # the client may answer that this file opens in a popup here
+
+    def on_ack(response: dict[str, object]) -> int:
+        if response.get("opener") == "tmux":
+            return show_inline(str(request["path"]), request.get("line"), args.cwd)
         route_feedback(args, "opened via local opener bridge")
-    return returncode
+        return 0
+
+    return deliver_request(args.socket, request, args.timeout, log_path, "auto", on_ack)
 
 
 if __name__ == "__main__":
