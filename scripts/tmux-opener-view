@@ -14,14 +14,17 @@ import os
 import shutil
 import subprocess
 import sys
+import termios
+import tty
 from dataclasses import dataclass
 from pathlib import Path
+
+from tmux_opener_common import IMAGE_SUFFIXES
 
 
 HIGHLIGHT_LIMIT = 20 * 1024 * 1024  # larger text skips bat/jq and streams through less
 TABLE_ROWS = 5000
 TABLE_CELL = 40
-IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"})
 
 
 @dataclass
@@ -164,9 +167,10 @@ def page_table(screen: curses.window, view: Table) -> int:
             top, note = (match, "") if match is not None else (top, " no more matches")
 
 
-def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[int, int] = (80, 24)) -> tuple[list[str] | str | Table | None, list[str] | None]:
+def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[int, int] = (80, 24),
+         pixels: bool = False) -> tuple[list[str] | str | Table | None, list[str] | None]:
     """Return (producer, pager): an argv or text piped into less, None when less reads the file,
-    or a Table with no pager for the built-in table view."""
+    a Table with no pager for the built-in table view, or an argv drawing to the terminal with no pager."""
 
     name = path.name or str(path)
     if path.is_dir():
@@ -174,6 +178,9 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     suffix = path.suffix.lower()
     if suffix in IMAGE_SUFFIXES:
         columns, rows = size
+        if pixels and which("chafa"):
+            return ["chafa", "--format=kitty", "--passthrough=tmux", "--align=mid,mid",
+                    f"--size={columns}x{rows - 1}", str(path)], None
         if which("chafa"):
             return ["chafa", "--format=symbols", f"--size={columns}x{rows - 2}", str(path)], pager(name)
         if which("timg"):
@@ -207,6 +214,16 @@ def run(producer: list[str] | str | Table | None, pager_command: list[str] | Non
         return curses.wrapper(page_table, producer)
     if producer is None:
         return subprocess.run(pager_command, check=False).returncode
+    if pager_command is None:  # pixel images: less would mangle the graphics escapes
+        drawn = subprocess.run(producer, check=False).returncode
+        print(f"\x1b[{shutil.get_terminal_size().lines};1H\x1b[2mPress any key to close\x1b[0m", end="", flush=True)
+        attributes = termios.tcgetattr(sys.stdin)
+        try:
+            tty.setcbreak(sys.stdin)
+            os.read(sys.stdin.fileno(), 1)
+        finally:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, attributes)
+        return drawn
     if isinstance(producer, str):
         viewer = subprocess.Popen(pager_command, stdin=subprocess.PIPE)
         try:
@@ -228,10 +245,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path")
     parser.add_argument("--line", type=int)
+    parser.add_argument("--pixels", action="store_true", help="draw images with kitty graphics")
     args = parser.parse_args()
     path = Path(args.path)
     try:
-        return run(*plan(path, args.line, size=tuple(shutil.get_terminal_size())))
+        return run(*plan(path, args.line, size=tuple(shutil.get_terminal_size()), pixels=args.pixels))
     except OSError as exc:
         print(f"tmux-opener: cannot show {path}: {exc.strerror or exc}", file=sys.stderr)
         input("Press Enter to close. ")

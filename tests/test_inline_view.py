@@ -64,6 +64,8 @@ def test_tables_json_binary_and_images_pick_matching_viewers(tmp_path: Path) -> 
     image.write_bytes(b"\x89PNG\r\n\x1a\n\0")
     assert VIEW["plan"](image, None, which_only("chafa"), (100, 30))[0][:3] == ["chafa", "--format=symbols", "--size=100x28"]
     assert "Install chafa" in VIEW["plan"](image, None, which_only())[0]
+    producer, pager = VIEW["plan"](image, None, which_only("chafa"), (100, 30), pixels=True)
+    assert producer[:3] == ["chafa", "--format=kitty", "--passthrough=tmux"] and pager is None
 
     assert VIEW["plan"](tmp_path, None, which_only())[0] == ["ls", "-la", str(tmp_path)]
 
@@ -130,3 +132,23 @@ def test_view_key_needs_no_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
                                       "--socket", str(tmp_path / "missing.sock"), "--no-log"])
     assert dispatch["main"]() == 0
     assert shown == [(str(source), None, str(tmp_path))]
+
+
+def test_pixel_images_open_a_window_with_passthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        stdout = "xterm-ghostty ghostty 1.3.1" if command[1] == "display-message" else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+    monkeypatch.setattr(common.subprocess, "run", fake_run)
+    monkeypatch.setenv("TMUX", "/tmp/tmux-test,1,0")
+    assert common.show_inline(str(tmp_path / "loss.png"), None, str(tmp_path)) == 0
+    window = calls[-1]
+    assert window[:2] == ["tmux", "new-window"] and window[-5:] == [";", "set", "-pq", "allow-passthrough", "on"]
+    assert shlex.split(window[-6])[1:4] == ["--pixels", "--", str(tmp_path / "loss.png")]
+
+    calls.clear()
+    assert common.show_inline(str(tmp_path / "train.log"), None, str(tmp_path)) == 0
+    assert [call[1] for call in calls] == ["display-popup"]
