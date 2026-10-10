@@ -10,6 +10,7 @@ shell_quote() {
 key="$(tmux show-option -gqv '@tmux_opener_key')"
 download_key="$(tmux show-option -gqv '@tmux_opener_download_key')"
 save_as_key="$(tmux show-option -gqv '@tmux_opener_save_as_key')"
+view_key="$(tmux show-option -gqv '@tmux_opener_view_key')"
 picker_key="$(tmux show-option -gqv '@tmux_opener_picker_key')"
 dashboard_key="$(tmux show-option -gqv '@tmux_opener_dashboard_key')"
 socket_path="$(tmux show-option -gqv '@tmux_opener_socket')"
@@ -33,6 +34,7 @@ if [ -z "$dashboard_key" ]; then
 fi
 download_key="${download_key:-d}"
 save_as_key="${save_as_key:-D}"
+view_key="${view_key:-i}"
 
 cmd="TMUX_OPENER_CWD=#{q:pane_current_path}"
 if [ -n "$socket_path" ]; then
@@ -61,6 +63,8 @@ tmux bind-key -T copy-mode-vi "$download_key" send-keys -X copy-pipe-and-cancel 
 tmux bind-key -T copy-mode "$download_key" send-keys -X copy-pipe-and-cancel "$cmd --download"
 tmux bind-key -T copy-mode-vi "$save_as_key" send-keys -X copy-pipe-and-cancel "$cmd --save-as"
 tmux bind-key -T copy-mode "$save_as_key" send-keys -X copy-pipe-and-cancel "$cmd --save-as"
+tmux bind-key -T copy-mode-vi "$view_key" send-keys -X copy-pipe-and-cancel "$cmd --view"
+tmux bind-key -T copy-mode "$view_key" send-keys -X copy-pipe-and-cancel "$cmd --view"
 
 picker_cmd="TMUX_OPENER_CWD=\"\$PWD\""
 if [ -n "$socket_path" ]; then

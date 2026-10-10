@@ -190,7 +190,7 @@
     .savebar { position: sticky; bottom: 16px; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 18px; margin-top: 4px; }
     .savebar .state { color: var(--muted); font-size: 13px; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .savebar .state.dirty { color: var(--warn); font-weight: 550; }
-    .legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 2px; }
+    .legend { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 2px; }
     .legend div { font-size: 12.5px; color: var(--muted); }
     .legend b { display: block; color: var(--text); font-weight: 600; font-size: 13px; }
 
@@ -278,9 +278,9 @@
         view: "transfers", snapshot: null, filter: "all", query: "", inFlight: false, lastGood: null,
         pending: new Set(), settings: null, saved: null, settingsMeta: {}, saving: false, settingsError: null, savedAt: null,
       };
-      const OPENERS = [["vscode", "VS Code"], ["preview", "Preview"], ["download", "Download"]];
+      const OPENERS = [["vscode", "VS Code"], ["tmux", "Inline"], ["preview", "Preview"], ["download", "Download"]];
       const FILTERS = [["all", "All"], ["active", "Active"], ["completed", "Completed"], ["error", "Failed"], ["cancelled", "Cancelled"]];
-      const QUICK = [["*.pdf", "preview"], ["*.png", "preview"], ["*.jpg", "preview"], ["*.csv", "preview"], ["*.mp4", "preview"], ["*.pt", "download"]];
+      const QUICK = [["*.log", "tmux"], ["*.csv", "tmux"], ["*.json", "tmux"], ["*.md", "tmux"], ["*.txt", "tmux"], ["*.pdf", "preview"], ["*.png", "preview"], ["*.mp4", "preview"], ["*.pt", "download"]];
       const KINDS = { doc: ["pdf", "md", "txt", "log", "tex"], img: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff"], data: ["csv", "tsv", "json", "h5", "hdf5", "npz", "npy", "parquet", "nc", "zarr"], model: ["pt", "pth", "ckpt", "safetensors", "onnx", "bin"] };
       const $ = (id) => document.getElementById(id);
       const el = (tag, cls, text) => {
@@ -546,7 +546,7 @@
         const match = /\.([a-z0-9]+)$/i.exec(rule.pattern.trim());
         const allowed = state.settingsMeta.preview_suffixes || [];
         if (!match || !allowed.length || allowed.includes(`.${match[1].toLowerCase()}`)) return null;
-        return `Preview isn't available for .${match[1]} files (they could run code when opened). Use VS Code or Download.`;
+        return `Preview isn't available for .${match[1]} files (they could run code when opened). Use VS Code, Inline or Download.`;
       };
       const ruleRow = (rule, index) => {
         const wrap = el("div", "rule");
@@ -608,7 +608,7 @@
         if (state.settingsMeta.error) nodes.push(el("div", "alert warn", state.settingsMeta.error));
 
         const legend = el("div", "legend");
-        [["VS Code", "Open in VS Code Remote-SSH, at the selected line."], ["Preview", "Copy to this machine and open in the default app."], ["Download", "Save into your Downloads folder."]]
+        [["VS Code", "Open in VS Code Remote-SSH, at the selected line."], ["Inline", "Show instantly in a tmux popup on the remote host; q closes it."], ["Preview", "Copy to this machine and open in the default app."], ["Download", "Save into your Downloads folder."]]
           .forEach(([name, detail]) => { const item = el("div"); item.append(el("b", "", name), el("span", "", detail)); legend.append(item); });
 
         const rules = el("div");

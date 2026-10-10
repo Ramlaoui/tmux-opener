@@ -97,7 +97,9 @@ tmux-opener ssh --dry-run --no-start-client HOST
 ```
 
 Inside remote tmux copy mode, select a URL or path and press `o`. If `fzf` is
-installed, the prefix target picker also uses `o` by default.
+installed, the prefix target picker also uses `o` by default. Press `i` instead
+to view the selected file or folder in a tmux popup on the host, without the
+bridge or VS Code (see [inline view](#inline-view)).
 
 ### VimTeX PDF preview
 
@@ -260,6 +262,7 @@ Defaults:
 
 - Copy-mode key: `o`
 - Copy-mode download keys: `d` (Downloads), `D` (save dialog)
+- Copy-mode inline view key: `i`
 - Prefix target picker key: `o`
 - Remote socket: `/tmp/tmux-opener-$USER.sock`
 - Remote folders open in a new VS Code Remote-SSH window
@@ -276,6 +279,7 @@ Common tmux options:
 set -g @tmux_opener_key 'o'
 set -g @tmux_opener_download_key 'd'
 set -g @tmux_opener_save_as_key 'D'
+set -g @tmux_opener_view_key 'i'
 set -g @tmux_opener_picker_key 'o'
 set -g @tmux_opener_fallback 'auto' # or local, command, none
 ```
@@ -303,12 +307,14 @@ always open in VS Code:
 | Opener | Effect |
 | --- | --- |
 | `vscode` | VS Code Remote-SSH at the selected line (default) |
+| `tmux` | Inline: show the file in a tmux popup on the remote host (shown as **Inline**) |
 | `preview` | Copy into `~/.cache/tmux-opener/preview/` and open locally (PDFs use the PDF viewer below) |
 | `download` | Queue a normal download into Downloads |
 
 ```json
 {
   "rules": [
+    {"pattern": "*.log", "opener": "tmux"},
     {"pattern": "*.pdf", "opener": "preview"},
     {"pattern": "*/figures/*.png", "opener": "preview"},
     {"pattern": "*.ckpt", "opener": "download"}
@@ -333,6 +339,25 @@ them. For the same reason `preview` only accepts documents, images, audio and
 video (`.pdf`, `.md`, `.txt`, `.csv`, `.png`, `.mp4`, …); formats that can run
 code when opened, such as `.html`, `.svg`, `.command` or office files, are
 refused. Use `download` for those.
+
+### Inline view
+
+The `tmux` opener and the `i` copy-mode key show a file in a 90% tmux popup on
+the remote host; `q` closes it. The viewer uses what the host has installed:
+
+- text: `bat` (or `batcat`) with the selected line highlighted, otherwise `less`
+- `.csv`/`.tsv`: aligned columns with the header pinned while scrolling (first
+  5000 rows); `j`/`k`, `space`/`b`, `h`/`l`, `g`/`G` and `/` search
+- `.md`: `glow` when installed, otherwise the text viewer
+- `.json`: `jq`, otherwise Python's `json.tool`
+- images: `chafa` or `timg` when installed, otherwise file details
+- binary files: file type and size instead of raw bytes
+- folders: `ls -la`
+
+`path:LINE` selections open at that line. Files over 20 MiB skip highlighting
+and stream through `less`. tmux older than 3.2 has no popups, so the view opens
+in a new window instead. An `o` press only uses the Inline rule when the remote
+plugin is new enough to show popups; older plugins and VimTeX keep VS Code.
 
 ## Troubleshooting
 

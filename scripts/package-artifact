@@ -49,6 +49,7 @@ case "${kind}" in
       "scripts/tmux-opener-pick"
       "scripts/tmux-opener-send"
       "scripts/tmux-opener-status"
+      "scripts/tmux-opener-view"
       "scripts/tmux_opener_common.py"
       "integration/vimtex.lua"
     )
@@ -58,6 +59,7 @@ case "${kind}" in
       "scripts/tmux-opener-pick"
       "scripts/tmux-opener-send"
       "scripts/tmux-opener-status"
+      "scripts/tmux-opener-view"
     )
     ;;
   client)

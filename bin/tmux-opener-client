@@ -1059,6 +1059,12 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
         opener = "vscode"
         if validate_target_type(request.get("target_type")) == "file":
             opener = opener_settings.opener_for(settings, path)
+        if opener == "tmux":
+            # Senders that cannot show a popup omit "inline"; they keep VS Code.
+            if request.get("inline") is True:
+                log_line("rule opener=tmux")
+                return {"opener": "tmux"}
+            opener = "vscode"
         if opener != "vscode":
             log_line(f"rule opener={opener}")
             host = validate_host(request.get("ssh_host"), allowed_hosts)

@@ -16,7 +16,8 @@ import tempfile
 from pathlib import Path
 
 
-OPENERS = ("vscode", "preview", "download")
+# "tmux" asks the remote plugin to show the file in a tmux popup itself.
+OPENERS = ("vscode", "tmux", "preview", "download")
 WINDOW_POLICIES = ("new", "reuse")
 PDF_VIEWERS = ("auto", "zathura", "skim", "sioyek", "acrobat", "system")
 PDF_APPLICATIONS = {
