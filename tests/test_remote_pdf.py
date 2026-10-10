@@ -160,7 +160,7 @@ def test_sioyek_targets_the_same_file_and_reloads_without_focus(preview, monkeyp
     assert calls[1] == ("viewer", ["/apps/sioyek", "--new-window", str(local_pdf)])
     state["pdf"] = b"%PDF-1.7\nsecond build"
     client["dispatch"]({**request, "refresh": True}, args)
-    assert calls[-1] == ("reload", ["/apps/sioyek", "--nofocus", "--new-window", str(local_pdf),
+    assert calls[-1] == ("reload", ["/apps/sioyek", "--nofocus", str(local_pdf),
                                     "--execute-command", "reload"])
     assert local_pdf.read_bytes() == state["pdf"]
     state["reload_returncode"] = 1

@@ -58,8 +58,12 @@ function M.setup()
             return
           end
           vim.schedule(function()
+            local stderr = result.stderr or ""
+            local reason = stderr:match("tmux%-opener: ([^\r\n]+)")
+              or stderr:match("([^\r\n]+)[\r\n]*$")
+              or ("exit code " .. result.code)
             vim.notify(
-              "tmux-opener VimTeX PDF refresh failed (exit code " .. result.code .. ")",
+              "tmux-opener PDF refresh failed:\n" .. reason:sub(1, 500),
               vim.log.levels.WARN
             )
           end)
