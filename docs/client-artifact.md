@@ -51,8 +51,8 @@ explicitly started with `--allow-ssh-host HOST`.
 
 The remote VimTeX adapter sends `open_remote_pdf` requests. The client fetches
 the PDF over SSH, opens a stable local copy, and replaces it after successful
-builds. Refresh requests never reopen or focus the viewer; transfer failures
-preserve the previous PDF. SSH aliases and custom SSH configuration still apply.
+builds. Transfer failures preserve the previous PDF. SSH aliases and custom SSH
+configuration still apply.
 
 The default viewer is Zathura on Linux when installed, Skim on macOS when installed,
 or the system PDF handler. Skim receives an explicit reload for the matching open
@@ -62,7 +62,14 @@ scripted reload, as recommended by [Skim's synchronization documentation](https:
 Unsaved Skim notes are preserved; save them before refreshing. macOS may ask for
 Automation permission for the client to control Skim. Other viewers must support
 automatic file reloading. `--pdf-viewer` or `TMUX_OPENER_PDF_VIEWER` can select
-`auto`, `zathura`, `skim`, or `system`. Restart the desktop client after updating:
+`auto`, `zathura`, `skim`, `sioyek`, `acrobat`, or `system`. The browser and tmux
+dashboards detect viewers installed on the desktop, including applications in
+`/Applications` and `~/Applications` on macOS. Sioyek uses its command-line
+reload with `--nofocus`, targeting the same PDF window. Acrobat on macOS closes
+and reopens only the matching cached PDF, restoring its page and zoom; this can
+bring that document forward. It refuses to close a document with unsaved edits.
+macOS Automation permission is required for scripted Skim and Acrobat refreshes.
+Restart the desktop client after updating:
 
 ```sh
 tmux-opener restart-client HOST

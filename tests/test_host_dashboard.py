@@ -34,6 +34,13 @@ def load_dashboard():
 dashboard = load_dashboard()
 
 
+def test_viewer_keyboard_selection_skips_uninstalled_apps():
+    settings = {"rules": [], "pdf_viewer": "auto"}
+    changed, _selected = dashboard.edit_settings(settings, 2, curses.KEY_RIGHT, None,
+                                                 ["auto", "sioyek", "acrobat", "system"])
+    assert changed and settings["pdf_viewer"] == "sioyek"
+
+
 def status_response() -> dict[str, object]:
     return {
         "ok": True,

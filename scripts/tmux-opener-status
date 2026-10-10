@@ -318,7 +318,7 @@ OPENER_LABELS = {"vscode": "VS Code", "preview": "Preview", "download": "Downloa
 SETTING_ROWS = (
     ("vscode_file_window", "VS Code files", ("new", "reuse")),
     ("vscode_folder_window", "VS Code folders", ("new", "reuse")),
-    ("pdf_viewer", "PDF viewer", ("auto", "zathura", "skim", "system")),
+    ("pdf_viewer", "PDF viewer", ("auto", "zathura", "skim", "sioyek", "acrobat", "system")),
 )
 
 
@@ -727,6 +727,7 @@ def request_settings(socket_path: str | None, timeout: float, local: bool) -> di
         module = _local_settings_module()
         settings, error = module.load()
         return {"settings": settings, "error": error, "path": str(module.settings_path()),
+                "available_pdf_viewers": module.available_pdf_viewers(),
                 "preview_suffixes": sorted(module.PREVIEW_SUFFIXES)}
     response = send_request(socket_path or default_socket_path(), {"version": 1, "action": "get_settings"}, timeout)
     if response.get("ok") is not True:
@@ -775,7 +776,8 @@ def _prompt(screen: Any, label: str) -> str:
     return sanitize_terminal_text(raw.decode("utf-8", "replace")).strip()
 
 
-def edit_settings(settings: dict[str, object], selected: int, key: int, screen: Any) -> tuple[bool, int]:
+def edit_settings(settings: dict[str, object], selected: int, key: int, screen: Any,
+                  available_pdf_viewers: list[str] | None = None) -> tuple[bool, int]:
     """Apply one opener-view key to settings; return (changed, selection)."""
 
     rules = settings.get("rules")
@@ -790,6 +792,10 @@ def edit_settings(settings: dict[str, object], selected: int, key: int, screen: 
             rule["opener"] = choices[(choices.index(rule["opener"]) + step) % len(choices)] if rule["opener"] in choices else choices[0]
         else:
             name, _label_text, choices = SETTING_ROWS[selected - len(rules)]
+            if name == "pdf_viewer" and available_pdf_viewers is not None:
+                choices = tuple(choice for choice in choices if choice in available_pdf_viewers)
+                if not choices:
+                    return False, selected
             current = settings.get(name)
             settings[name] = choices[(choices.index(current) + step) % len(choices)] if current in choices else choices[0]
         return True, selected
@@ -908,7 +914,8 @@ def run_live_dashboard(
                 opener_selected = (opener_selected + 1) % count
             else:
                 edited = json.loads(json.dumps(settings))
-                changed, opener_selected = edit_settings(edited, opener_selected, key, screen)
+                changed, opener_selected = edit_settings(edited, opener_selected, key, screen,
+                                                        settings_state.get("available_pdf_viewers"))
                 if changed:
                     try:
                         save_settings(edited, socket_path, timeout, local)
