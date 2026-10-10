@@ -346,7 +346,9 @@ The `tmux` opener and the `i` copy-mode key show a file in a 90% tmux popup on
 the remote host; `q` closes it. The viewer uses what the host has installed:
 
 - text: `bat` (or `batcat`) with the selected line highlighted, otherwise `less`
-- `.csv`/`.tsv`: aligned columns (first 5000 rows)
+- `.csv`/`.tsv`: aligned columns with the header pinned while scrolling (first
+  5000 rows); `j`/`k`, `space`/`b`, `h`/`l`, `g`/`G` and `/` search
+- `.md`: `glow` when installed, otherwise the text viewer
 - `.json`: `jq`, otherwise Python's `json.tool`
 - images: `chafa` or `timg` when installed, otherwise file details
 - binary files: file type and size instead of raw bytes

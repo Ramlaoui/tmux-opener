@@ -42,8 +42,14 @@ def test_text_uses_bat_at_the_selected_line_or_plain_less(tmp_path: Path) -> Non
 def test_tables_json_binary_and_images_pick_matching_viewers(tmp_path: Path) -> None:
     table = tmp_path / "scores.csv"
     table.write_text('name,score\nalice,"0.9, final"\n')
-    text, pager = VIEW["plan"](table, None, which_only("bat"))
-    assert "alice  0.9, final" in text and "-S" in pager
+    view, pager = VIEW["plan"](table, 3, which_only("bat"))
+    assert pager is None and view.start == 1
+    assert view.lines[0] == "name   score" and view.lines[1].startswith("─────") and view.lines[2] == "alice  0.9, final"
+
+    notes = tmp_path / "README.md"
+    notes.write_text("# Notes\n")
+    assert VIEW["plan"](notes, None, which_only("glow", "bat"), (100, 30))[0] == ["/usr/bin/glow", "--style=dark", "--width=98", "--", str(notes)]
+    assert VIEW["plan"](notes, None, which_only("bat"))[0][0] == "/usr/bin/bat"
 
     data = tmp_path / "cfg.json"
     data.write_text('{"a": 1}')
@@ -67,12 +73,13 @@ def test_popup_runs_the_viewer_with_a_quoted_path(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(common.sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(common.subprocess, "run", lambda command, **_kwargs: calls.append(command) or subprocess.CompletedProcess(command, 0))
 
-    path = "/work/it's $(here).log"
-    assert common.show_inline(path, 7, "/work") == 0
+    path = "-it's $(here).log"
+    assert common.show_inline(path, 7, "/work/#(touch x)") == 0
 
     (popup,) = calls
-    assert popup[:8] == ["tmux", "display-popup", "-E", "-w", "90%", "-h", "90%", "-d"]
-    assert shlex.split(popup[-1]) == [str(ROOT / "scripts/tmux-opener-view"), path, "--line", "7", "||", "true"]
+    # tmux expands formats in the directory but not in the shell command.
+    assert popup[:9] == ["tmux", "display-popup", "-E", "-w", "90%", "-h", "90%", "-d", "/work/##(touch x)"]
+    assert shlex.split(popup[-1]) == [str(ROOT / "scripts/tmux-opener-view"), "--line", "7", "--", path, "||", "true"]
 
 
 def test_dispatch_shows_inline_when_the_client_answers_tmux(tmp_path: Path) -> None:
@@ -110,7 +117,7 @@ def test_dispatch_shows_inline_when_the_client_answers_tmux(tmp_path: Path) -> N
     assert requests[1]["inline"] is True and requests[1]["line"] == 3
     tmux_args = (tmp_path / "tmux.args").read_text().splitlines()
     assert tmux_args[0] == "display-popup"
-    assert shlex.split(tmux_args[-1])[1:4] == [str(source), "--line", "3"]
+    assert shlex.split(tmux_args[-1])[1:5] == ["--line", "3", "--", str(source)]
 
 
 def test_view_key_needs_no_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

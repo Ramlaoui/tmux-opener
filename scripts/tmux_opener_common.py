@@ -606,16 +606,19 @@ def deliver_request(
 def show_inline(path: str, line: object, cwd: str) -> int:
     """Show a file in this terminal when interactive, otherwise in a tmux popup."""
 
-    command = [str(Path(__file__).resolve().with_name("tmux-opener-view")), path]
+    command = [str(Path(__file__).resolve().with_name("tmux-opener-view"))]
     if type(line) is int:
         command += ["--line", str(line)]
+    command += ["--", path]
     if sys.stdin.isatty() and sys.stdout.isatty():
         return subprocess.run(command, check=False).returncode
     # The viewer reports its own errors, so a failed popup means tmux cannot show one.
     shell_command = shlex.join(command) + " || true"
+    # tmux expands #{...} and #(...) formats in directories and window names.
+    cwd = cwd.replace("#", "##")
     popup = subprocess.run(["tmux", "display-popup", "-E", "-w", "90%", "-h", "90%", "-d", cwd, shell_command],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     if popup.returncode:  # tmux before 3.2 has no popups
-        popup = subprocess.run(["tmux", "new-window", "-c", cwd, "-n", Path(path).name or "view", shell_command],
+        popup = subprocess.run(["tmux", "new-window", "-c", cwd, "-n", (Path(path).name or "view").replace("#", "##"), shell_command],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     return popup.returncode

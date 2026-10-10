@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import io
+import curses
+import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -20,6 +22,15 @@ HIGHLIGHT_LIMIT = 20 * 1024 * 1024  # larger text skips bat/jq and streams throu
 TABLE_ROWS = 5000
 TABLE_CELL = 40
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"})
+
+
+@dataclass
+class Table:
+    """Aligned rows shown by page_table with the header pinned; less 590 has no --header."""
+
+    name: str
+    lines: list[str]
+    start: int = 0
 
 
 def prompt_text(text: str) -> str:
@@ -60,8 +71,8 @@ def describe(path: Path, note: str, which=shutil.which) -> str:
     return f"{path}\n\n  {kind or 'binary data'}\n  {human_size(path.stat().st_size)}\n\n{note}\n"
 
 
-def table(path: Path) -> str | None:
-    """Align CSV/TSV columns; return None when the file is not a clean table."""
+def table(path: Path) -> list[str] | None:
+    """Align CSV/TSV columns into header, rule and rows; None when the file is not a clean table."""
 
     delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
     rows: list[list[str]] = []
@@ -78,19 +89,84 @@ def table(path: Path) -> str | None:
     truncated = len(rows) > TABLE_ROWS
     rows = rows[:TABLE_ROWS]
     widths = [max(len(row[index]) for row in rows if index < len(row)) for index in range(max(map(len, rows)))]
-    out = io.StringIO()
-    for number, row in enumerate(rows):
-        text = "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip()
-        out.write(f"\033[1m{text}\033[0m\n" if number == 0 else text + "\n")
-        if number == 0:
-            out.write("  ".join("─" * width for width in widths) + "\n")
+    lines = ["  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)).rstrip() for row in rows]
+    lines.insert(1, "  ".join("─" * width for width in widths))
     if truncated:
-        out.write(f"\n… showing the first {TABLE_ROWS} rows; open in VS Code or Preview for the rest\n")
-    return out.getvalue()
+        lines += ["", f"… showing the first {TABLE_ROWS} rows; open in VS Code or Preview for the rest"]
+    return lines
 
 
-def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[int, int] = (80, 24)) -> tuple[list[str] | str | None, list[str]]:
-    """Return (producer, pager): an argv or text piped into the pager, or None when it reads the file."""
+def page_table(screen: curses.window, view: Table) -> int:
+    """A small pager for tables: less-style keys, header pinned, / searches rows."""
+
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    header, body = view.lines[:2], view.lines[2:]
+    top, left, query, note = view.start, 0, "", ""
+
+    def find(start: int, step: int) -> int | None:
+        rows = range(start, len(body)) if step > 0 else range(start, -1, -1)
+        return next((row for row in rows if query in body[row].lower()), None)
+
+    while True:
+        height, width = screen.getmaxyx()
+        page = max(1, height - 3)
+        top = max(0, min(top, len(body) - page))
+        screen.erase()
+        visible = [(header[0], curses.A_BOLD), (header[1], curses.A_DIM)]
+        visible += [(line, curses.A_STANDOUT if query and query in line.lower() else 0) for line in body[top:top + page]]
+        status = note or f" {view.name}  rows {top + 1}-{min(top + page, len(body))}/{len(body)}  ←→ scroll  / search  q quits"
+        visible += [("", 0)] * (height - 1 - len(visible)) + [(status.ljust(width), curses.A_REVERSE)]
+        for y, (line, attr) in enumerate(visible[:height]):
+            try:
+                screen.addnstr(y, 0, line if y == height - 1 else line[left:], width - 1, attr)
+            except curses.error:
+                pass
+        note = ""
+        key = screen.getch()
+        if key in (ord("q"), ord("Q"), 27):
+            return 0
+        moves = {ord("j"): 1, curses.KEY_DOWN: 1, 10: 1, ord("k"): -1, curses.KEY_UP: -1,
+                 ord(" "): page, ord("f"): page, curses.KEY_NPAGE: page, ord("b"): -page, curses.KEY_PPAGE: -page,
+                 ord("d"): page // 2, ord("u"): -(page // 2)}
+        if key in moves:
+            top += moves[key]
+        elif key in (ord("g"), curses.KEY_HOME):
+            top = 0
+        elif key in (ord("G"), curses.KEY_END):
+            top = len(body)
+        elif key in (ord("l"), curses.KEY_RIGHT):
+            left += 8
+        elif key in (ord("h"), curses.KEY_LEFT):
+            left = max(0, left - 8)
+        elif key == ord("0"):
+            left = 0
+        elif key == ord("/"):
+            screen.addnstr(height - 1, 0, "/".ljust(width), width - 1, curses.A_REVERSE)
+            curses.echo()
+            try:
+                curses.curs_set(1)
+            except curses.error:
+                pass
+            query = screen.getstr(height - 1, 1, 200).decode("utf-8", "replace").strip().lower()
+            curses.noecho()
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+            if query:
+                match = find(top, 1)
+                top, note = (match, "") if match is not None else (top, f" pattern not found: {query}")
+        elif key in (ord("n"), ord("N")) and query:
+            match = find(top + 1, 1) if key == ord("n") else find(top - 1, -1)
+            top, note = (match, "") if match is not None else (top, " no more matches")
+
+
+def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[int, int] = (80, 24)) -> tuple[list[str] | str | Table | None, list[str] | None]:
+    """Return (producer, pager): an argv or text piped into less, None when less reads the file,
+    or a Table with no pager for the built-in table view."""
 
     name = path.name or str(path)
     if path.is_dir():
@@ -107,13 +183,17 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     if is_binary(path):
         return describe(path, "Binary file: use the Preview or Download opener to open it on your desktop.", which), pager(name)
     small = path.stat().st_size <= HIGHLIGHT_LIMIT
-    text = table(path) if suffix in {".csv", ".tsv"} and small else None
-    if text is not None:
-        return text, pager(name, chop=True)
+    lines = table(path) if suffix in {".csv", ".tsv"} and small else None
+    if lines is not None:
+        # File line N holds row N - 1; the header stays pinned above it.
+        return Table(name, lines, max(0, (line or 2) - 2)), None
     if suffix == ".json" and small:
         if which("jq"):
             return ["jq", "-C", ".", str(path)], pager(name)
         return [sys.executable, "-m", "json.tool", str(path)], pager(name)
+    glow = which("glow")
+    if suffix in {".md", ".markdown"} and glow and small:
+        return [glow, "--style=dark", f"--width={min(size[0] - 2, 120)}", "--", str(path)], pager(name)
     bat = which("bat") or which("batcat")
     if bat and small:
         highlight = ["--highlight-line", str(line)] if line else []
@@ -121,7 +201,10 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     return None, pager(name, line, numbers=bool(line)) + ["--", str(path)]
 
 
-def run(producer: list[str] | str | None, pager_command: list[str]) -> int:
+def run(producer: list[str] | str | Table | None, pager_command: list[str] | None) -> int:
+    if isinstance(producer, Table):
+        os.environ.setdefault("ESCDELAY", "25")
+        return curses.wrapper(page_table, producer)
     if producer is None:
         return subprocess.run(pager_command, check=False).returncode
     if isinstance(producer, str):
