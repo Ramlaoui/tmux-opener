@@ -12,6 +12,11 @@ It does not include the Local Opener Client or the SSH setup wrapper. Install
 and run the local side separately on the desktop machine that should open URLs
 and editor targets.
 
+In copy mode, select file paths and press `d` to download to the client Downloads
+folder, or `D` to open a save dialog on the client. Both require an updated Local
+Opener Client and an available bridge. Several paths can be selected, one per
+line or space-separated (quote filenames containing spaces).
+
 ## Install from archive
 
 ```sh

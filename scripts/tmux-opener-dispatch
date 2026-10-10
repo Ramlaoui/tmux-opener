@@ -14,6 +14,7 @@ import sys
 from tmux_opener_common import (
     bridge_available,
     build_request,
+    build_download_requests,
     clean_selection,
     default_log_path,
     default_socket_path,
@@ -178,6 +179,9 @@ def run_fallback(args: argparse.Namespace, selection: str, log_path: str | None)
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("selection", nargs="?", help="text to open; defaults to stdin")
+    download = parser.add_mutually_exclusive_group()
+    download.add_argument("--download", action="store_true", help="download selected files to client Downloads")
+    download.add_argument("--save-as", action="store_true", help="ask where to save each file on the client")
     parser.add_argument("--socket", default=default_socket_path(), help="remote forwarded Unix socket path")
     parser.add_argument("--cwd", default=os.environ.get("TMUX_OPENER_CWD") or os.getcwd())
     parser.add_argument("--ssh-host", default=default_ssh_host())
@@ -204,6 +208,24 @@ def main() -> int:
 
     raw_selection = args.selection if args.selection is not None else sys.stdin.read()
     selection = clean_selection(raw_selection)
+
+    if args.download or args.save_as:
+        requests = build_download_requests(raw_selection, args.cwd, args.ssh_host, ask_destination=args.save_as)
+        if not requests:
+            tmux_message("select existing file paths to download (one per line or space-separated)")
+            return 1
+        if args.print_request:
+            print(json.dumps(requests, indent=2, sort_keys=True))
+            return 0
+        if not bridge_allowed(args.bridge_policy) or not bridge_available(args.socket, args.timeout):
+            tmux_message(f"downloads require the local client bridge at {args.socket}")
+            return 1
+        for request in requests:
+            returncode = deliver_request(args.socket, request, args.timeout, log_path, "auto")
+            if returncode:
+                return returncode
+        route_feedback(args, f"queued {len(requests)} download(s) on client; completion appears in client notifications/log")
+        return 0
 
     if args.print_request:
         request = build_request(selection, args.cwd, args.ssh_host)

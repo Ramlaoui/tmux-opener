@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import socket
 import stat
 import subprocess
@@ -78,7 +79,7 @@ def log_line(log_path: str | None, message: str) -> None:
 
 def describe_request(request: dict[str, object]) -> str:
     action = request.get("action")
-    if action in ("open_url", "open_remote_localhost", "open_vscode_remote", "ping"):
+    if action in ("open_url", "open_remote_localhost", "open_vscode_remote", "download_file", "ping"):
         return f"action={action}"
     return "action=unknown"
 
@@ -422,6 +423,61 @@ def build_request(selection: str, cwd: str, ssh_host: str | None) -> dict[str, o
     if column is not None:
         request["column"] = column
     return request
+
+
+def build_download_requests(
+    selection: str, cwd: str, ssh_host: str | None, *, ask_destination: bool = False
+) -> list[dict[str, object]] | None:
+    def file_path(text: str) -> str | None:
+        text = clean_selection(text)
+        if not text or "\x00" in text or is_open_url(text) or parse_remote_localhost(text):
+            return None
+        # Prefer the literal name, including spaces, punctuation and numeric suffixes.
+        candidate = Path(os.path.expanduser(text))
+        if not candidate.is_absolute():
+            candidate = Path(cwd, candidate)
+        if candidate.is_file():
+            return str(candidate.resolve())
+        if text[0] in "\"'`" and text[-1] != text[0]:
+            return None
+        for variant in candidate_variants(text):
+            resolved = resolve_path_candidate(variant, cwd)
+            if resolved and Path(resolved[0]).is_file():
+                return resolved[0]
+        return None
+
+    paths: list[str] = []
+    for line in selection.splitlines():
+        if not line.strip():
+            continue
+        path = file_path(line)
+        if path:
+            paths.append(path)
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            return None
+        if not tokens:
+            return None
+        for token in tokens:
+            path = file_path(token)
+            if path is None:
+                return None
+            paths.append(path)
+
+    requests: list[dict[str, object]] = []
+    for path in dict.fromkeys(paths):
+        request: dict[str, object] = {
+            "version": 1,
+            "action": "download_file",
+            "path": path,
+            "ask_destination": ask_destination,
+        }
+        if ssh_host:
+            request["ssh_host"] = ssh_host
+        requests.append(request)
+    return requests or None
 
 
 def send_request(socket_path: str, request: dict[str, object], timeout: float) -> dict[str, object]:

@@ -18,6 +18,7 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -58,6 +59,7 @@ class LocalhostForward:
 
 
 REMOTE_LOCALHOST_FORWARDS: dict[tuple[str, str, int], LocalhostForward] = {}
+SAVE_DIALOG_LOCK = threading.Lock()
 
 
 class RequestError(Exception):
@@ -590,6 +592,127 @@ def open_remote_localhost(
     open_with_system(local_remote_url(scheme, local_port, path, query, fragment), args.dry_run, args.verbose)
 
 
+def downloads_directory() -> Path:
+    if platform.system() == "Linux" and shutil.which("xdg-user-dir"):
+        result = subprocess.run(["xdg-user-dir", "DOWNLOAD"], capture_output=True, text=True, check=False)
+        path = result.stdout.strip()
+        if result.returncode == 0 and path and Path(path).is_absolute():
+            return Path(path)
+    return Path.home() / "Downloads"
+
+
+def choose_download_path(default: Path) -> Path | None:
+    system = platform.system()
+    if system == "Darwin":
+        command = [
+            "osascript", "-e",
+            'on run argv\nset destination to choose file name with prompt "Save remote file" '
+            'default name (item 1 of argv) default location (POSIX file (item 2 of argv))\n'
+            'return POSIX path of destination\nend run',
+            default.name, str(default.parent),
+        ]
+    elif shutil.which("zenity"):
+        command = ["zenity", "--file-selection", "--save", "--title=Save remote file", f"--filename={default}"]
+    elif shutil.which("kdialog"):
+        command = ["kdialog", "--getsavefilename", str(default), "--title", "Save remote file"]
+    else:
+        # Run Tk in its own process: GUI toolkits must own their main thread.
+        command = [sys.executable, "-c",
+                   "import sys, tkinter as tk; from tkinter import filedialog; "
+                   "from pathlib import Path; p=Path(sys.argv[1]); root=tk.Tk(); root.withdraw(); "
+                   "print(filedialog.asksaveasfilename(title='Save remote file', "
+                   "initialdir=str(p.parent), initialfile=p.name)); root.destroy()", str(default)]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode:
+        if result.returncode == 1 and system != "Darwin" and command[0] != sys.executable:
+            return None
+        if system == "Darwin" and "(-128)" in result.stderr:
+            return None
+        raise RequestError(f"save dialog failed; install zenity, kdialog or Tk on the client: {result.stderr.strip()}")
+    path = result.stdout.strip()
+    if not path:
+        return None
+    destination = Path(path)
+    if not destination.is_absolute():
+        raise RequestError("save dialog returned a relative path")
+    return destination
+
+
+def download_notification(message: str) -> None:
+    log_line("download failed; enable --verbose for details" if message.startswith("Download failed") else "download completed")
+    if shutil.which("notify-send"):
+        try:
+            subprocess.run(["notify-send", "--", "tmux-opener", message],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def download_file(
+    host: str, path: str, ask_destination: bool, ssh: str,
+    ssh_config: str | None = None, verbose: bool = False,
+) -> None:
+    temporary: Path | None = None
+    try:
+        directory = downloads_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / Path(path).name
+        if ask_destination:
+            with SAVE_DIALOG_LOCK:
+                destination = choose_download_path(destination)
+            if destination is None:
+                log_line(f"download cancelled: {host}:{path}" if verbose else "download cancelled")
+                return
+            if destination.exists():
+                raise RequestError(f"destination already exists; choose a new filename: {destination}")
+
+        quoted_path = shlex.quote(path)
+        command = [ssh]
+        if ssh_config is not None:
+            command.extend(["-F", str(Path(ssh_config).expanduser())])
+        command.extend([
+            "-T", "-S", "none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes",
+            "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no",
+            "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3", "--", host,
+            f"test -f {quoted_path} && cat -- {quoted_path}",
+        ])
+        log_line(f"download started: {host}:{path} -> {destination}" if verbose else "download started")
+        with tempfile.NamedTemporaryFile(prefix=".tmux-opener-", suffix=".part",
+                                         dir=destination.parent, delete=False) as output:
+            temporary = Path(output.name)
+            with tempfile.TemporaryFile() as errors:
+                result = subprocess.run(command, stdout=output, stderr=errors,
+                                        stdin=subprocess.DEVNULL, check=False)
+                if result.returncode:
+                    raise RequestError(f"SSH exited {result.returncode}{stderr_suffix(errors)}")
+
+        original = destination
+        index = 0
+        while True:
+            try:
+                # Atomic publication without overwriting a file created by another download.
+                os.link(temporary, destination)
+                break
+            except FileExistsError:
+                if ask_destination:
+                    raise RequestError(f"destination already exists: {destination}")
+                index += 1
+                destination = original.with_name(f"{original.stem} ({index}){original.suffix}")
+        message = f"Downloaded {host}:{path} to {destination}"
+        if verbose:
+            log_line(message)
+        download_notification(message)
+    except (OSError, RequestError) as exc:
+        message = f"Download failed for {host}:{path}: {exc}"
+        if verbose:
+            log_line(message)
+        download_notification(message)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
     action = request.get("action")
     if args.verbose:
@@ -598,7 +721,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
     if action == "ping":
         return
 
-    if action in ("open_url", "open_vscode_remote", "open_remote_localhost"):
+    if action in ("open_url", "open_vscode_remote", "open_remote_localhost", "download_file"):
         log_line(f"request action={action}")
 
     if action == "open_url":
@@ -628,7 +751,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
         )
         return
 
-    if action == "open_remote_localhost":
+    if action in ("open_remote_localhost", "download_file"):
         if "ssh_host" not in request and args.default_ssh_host:
             request = {**request, "ssh_host": args.default_ssh_host}
         if args.allow_any_ssh_host:
@@ -637,7 +760,24 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
             allowed_hosts = set(args.allow_ssh_host)
         else:
             raise RequestError("no SSH hosts are allowed; pass --allow-ssh-host HOST")
-        open_remote_localhost(request, allowed_hosts, args)
+        if action == "open_remote_localhost":
+            open_remote_localhost(request, allowed_hosts, args)
+            return
+        host = validate_host(request.get("ssh_host"), allowed_hosts)
+        path = validate_path(request.get("path"))
+        if Path(path).name in ("", ".", "..") or any(character in path for character in "\r\n"):
+            raise RequestError("download path must name a file and contain no newlines")
+        ask_destination = request.get("ask_destination", False)
+        if not isinstance(ask_destination, bool):
+            raise RequestError("ask_destination must be a boolean")
+        ssh = shutil.which("ssh")
+        if not ssh:
+            raise RequestError("ssh is not installed on the client")
+        if args.dry_run:
+            message = f"dry-run download: {host}:{path} -> {'client save dialog' if ask_destination else downloads_directory()}"
+            log_line(message if args.verbose else "dry-run download")
+            return
+        threading.Thread(target=download_file, args=(host, path, ask_destination, ssh, args.ssh_config, args.verbose)).start()
         return
 
     raise RequestError("unsupported action")
