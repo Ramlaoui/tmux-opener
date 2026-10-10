@@ -25,6 +25,9 @@ def preview(tmp_path, monkeypatch):
     state = {"pdf": b"%PDF-1.7\nfirst build", "returncode": 0}
 
     def transfer(command, **kwargs):
+        if command[0] == "osascript":
+            calls.append(("reload", command))
+            return SimpleNamespace(returncode=state.get("reload_returncode", 0), stderr=b"reload failed")
         calls.append(("transfer", command))
         kwargs["stdout"].write(state["pdf"])
         return SimpleNamespace(returncode=state["returncode"], stderr=b"transfer failed")
@@ -97,6 +100,62 @@ def test_refresh_before_view_does_nothing(preview):
     client["dispatch"]({**request, "refresh": True}, args)
     assert calls == []
     assert list(cache.iterdir()) == []
+
+
+def test_skim_refresh_reloads_matching_document_without_opening_window(preview):
+    client, args, request, calls, state, cache = preview
+    args.pdf_viewer = "skim"
+    client["dispatch"](request, args)
+    local_pdf = next(cache.rglob("document.pdf"))
+    state["pdf"] = b"%PDF-1.7\nsecond build"
+    client["dispatch"]({**request, "refresh": True}, args)
+    assert local_pdf.read_bytes() == state["pdf"]
+    assert len([call for call in calls if call[0] == "viewer"]) == 1
+    reload = [call for call in calls if call[0] == "reload"]
+    assert len(reload) == 1
+    assert reload[0][1][-1] == str(local_pdf)
+    script = reload[0][1][2]
+    assert 'documents whose path is (item 1 of argv)' in script
+    assert "revert pdfDocument" in script
+    assert "modified of pdfDocument" in script
+    assert "activate" not in script
+    assert "open " not in script
+
+
+def test_skim_reload_error_is_reported_and_can_be_retried(preview):
+    client, args, request, calls, state, cache = preview
+    args.pdf_viewer = "skim"
+    client["dispatch"](request, args)
+    state.update(pdf=b"%PDF-1.7\nsecond build", reload_returncode=1)
+    with pytest.raises(client["RequestError"], match="Skim reload failed"):
+        client["dispatch"]({**request, "refresh": True}, args)
+    assert next(cache.rglob("document.pdf")).read_bytes() == state["pdf"]
+    state["reload_returncode"] = 0
+    client["dispatch"]({**request, "refresh": True}, args)
+    assert len([call for call in calls if call[0] == "reload"]) == 2
+    assert len([call for call in calls if call[0] == "viewer"]) == 1
+
+
+def test_auto_viewer_on_mac_reloads_skim(preview, monkeypatch):
+    client, args, request, calls, _, _ = preview
+    args.pdf_viewer = "auto"
+    monkeypatch.setattr(client["platform"], "system", lambda: "Darwin")
+    is_directory = Path.is_dir
+    monkeypatch.setattr(Path, "is_dir", lambda path: str(path) == "/Applications/Skim.app" or is_directory(path))
+    client["dispatch"](request, args)
+    client["dispatch"]({**request, "refresh": True}, args)
+    assert calls[1][1][:3] == ["open", "-a", "Skim"]
+    assert len([call for call in calls if call[0] == "reload"]) == 1
+
+
+@pytest.mark.parametrize("backend", ["launchd", "systemd-user"])
+def test_service_captures_pdf_viewer_preference(tmp_path, monkeypatch, backend):
+    wrapper = runpy.run_path(str(ROOT / "bin/tmux-opener"))
+    monkeypatch.setenv("TMUX_OPENER_PDF_VIEWER", "system")
+    args = wrapper["build_parser"]().parse_args(["install-service", "devbox", "--dry-run"])
+    content = wrapper["service_content"](args, "devbox", tmp_path / "devbox.sock", backend)
+    assert "--pdf-viewer" in content
+    assert "system" in content
 
 
 def test_pdf_rejects_unallowed_host(preview):
