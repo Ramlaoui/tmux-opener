@@ -83,6 +83,9 @@ RESUME_SCRIPT = (
 )
 ACTIVE_FOLDERS: set[Path] = set()
 ACTIVE_FOLDERS_LOCK = threading.Lock()
+# Folders download privately, then get the permissions a plain mkdir would give.
+UMASK = os.umask(0o077)
+os.umask(UMASK)
 
 
 class RequestError(Exception):
@@ -1261,6 +1264,7 @@ def download_folder(
             tar_folder(host, path, files, partial, ssh_command, cancel, progress, verbose)
         received = tree_size(partial)
 
+        os.chmod(partial, 0o777 & ~UMASK)
         original = destination
         index = 0
         while True:

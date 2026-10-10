@@ -4,6 +4,7 @@ import filecmp
 import io
 import json
 import os
+import stat
 import runpy
 import shutil
 import socket
@@ -122,6 +123,10 @@ def test_folder_download_copies_tree_byte_identically(
     assert same_tree(tree, destination)
     assert os.readlink(destination / "nested" / "latest") == "weights.bin"
     assert os.access(destination / "nested" / "run.sh", os.X_OK)
+    # Published like a plain mkdir, not with the private partial-download mode.
+    normal = 0o777 & ~client["UMASK"]
+    assert stat.S_IMODE(destination.stat().st_mode) == normal
+    assert stat.S_IMODE((destination / "nested").stat().st_mode) & normal == stat.S_IMODE((destination / "nested").stat().st_mode)
     assert updates[0] == {"state": "downloading", "destination": str(destination)}
     assert no_partials(tmp_path / "Downloads")
     calls = [json.loads(line) for line in (tmp_path / "ssh-calls.jsonl").read_text().splitlines()]
