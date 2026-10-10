@@ -486,6 +486,9 @@ def transfer_line(download: Mapping[str, object], width: int, selected: bool = F
     fixed = 2 + 2 + 12 + (bar_width + 2 if bar_width else 0) + 19 + 13
     name_width = max(width - 1 - fixed, 10)
     name = _basename(download.get("path"))
+    if download.get("kind") == "folder":
+        count = _number(download.get("file_count"))
+        name = f"{name}/" + ("" if count is None else f" ({count} file{'' if count == 1 else 's'})")
     if download.get("preview"):
         name = f"{name} (preview)"
     line: Line = [

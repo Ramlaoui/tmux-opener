@@ -87,7 +87,8 @@ class DownloadQueue:
             self.storage_error = "Could not persist download history; check free disk space and permissions"
 
     def submit(self, host: str, path: str, ask_destination: bool, size_bytes: int | None = None,
-               preview: bool = False) -> dict:
+               preview: bool = False, kind: str = "file", files: list[str] | None = None,
+               file_count: int | None = None) -> dict:
         with self.lock:
             if self.closing:
                 raise ValueError("download queue is stopping")
@@ -96,7 +97,8 @@ class DownloadQueue:
             identifier = uuid.uuid4().hex
             created = timestamp()
             record = {"id": identifier, "ssh_host": host, "path": path, "ask_destination": ask_destination,
-                      "preview": preview, "size_bytes": size_bytes, "bytes_received": 0, "destination": None,
+                      "preview": preview, "kind": kind, "files": files, "file_count": file_count,
+                      "size_bytes": size_bytes, "bytes_received": 0, "destination": None,
                       "state": "queued", "created_at": created, "updated_at": created, "error": None}
             self.jobs[identifier] = record
             self.cancel_events[identifier] = threading.Event()
@@ -131,7 +133,8 @@ class DownloadQueue:
             if record["state"] not in {"failed", "cancelled", "interrupted"}:
                 raise ValueError("only failed, cancelled or interrupted downloads can be retried")
             return self.submit(record["ssh_host"], record["path"], record["ask_destination"], record["size_bytes"],
-                               record.get("preview", False))
+                               record.get("preview", False), record.get("kind", "file"), record.get("files"),
+                               record.get("file_count"))
 
     def _find(self, identifier: str, host: str) -> dict:
         record = self.jobs.get(identifier)

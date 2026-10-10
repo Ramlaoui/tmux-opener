@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import glob
+import itertools
 import json
 import os
 import re
@@ -44,6 +46,7 @@ WRAPPER_PAIRS = {
 }
 PATH_LEADING_PUNCTUATION = "\"'`([{<"
 PATH_TRAILING_PUNCTUATION = "\"'`)]}>.,;:"
+MAX_GLOB_FILES = 1000
 
 
 def default_socket_path() -> str:
@@ -80,7 +83,8 @@ def log_line(log_path: str | None, message: str) -> None:
 
 def describe_request(request: dict[str, object]) -> str:
     action = request.get("action")
-    if action in ("open_url", "open_remote_localhost", "open_vscode_remote", "open_remote_pdf", "download_file", "ping"):
+    if action in ("open_url", "open_remote_localhost", "open_vscode_remote", "open_remote_pdf", "download_file",
+                  "download_folder", "ping"):
         return f"action={action}"
     return "action=unknown"
 
@@ -426,10 +430,31 @@ def build_request(selection: str, cwd: str, ssh_host: str | None) -> dict[str, o
     return request
 
 
+def glob_download_target(pattern: str) -> tuple[str, tuple[str, ...]] | None:
+    """Return the folder before the first wildcard and the regular files matching below it."""
+
+    pattern = os.path.normpath(pattern)
+    parts = Path(pattern).parts
+    first = next(index for index, part in enumerate(parts) if any(character in part for character in "*?["))
+    base = Path(*parts[:first])
+    matches = list(itertools.islice(
+        (match for match in glob.iglob(pattern, recursive=True) if os.path.isfile(match)), MAX_GLOB_FILES + 1))
+    if len(matches) > MAX_GLOB_FILES:
+        raise ValueError(f"{pattern} matches more than {MAX_GLOB_FILES} files; narrow the pattern")
+    if not matches:
+        return None
+    return str(base.resolve()), tuple(sorted(os.path.relpath(match, base) for match in matches))
+
+
 def build_download_requests(
     selection: str, cwd: str, ssh_host: str | None, *, ask_destination: bool = False
 ) -> list[dict[str, object]] | None:
-    def file_path(text: str) -> str | None:
+    """Turn selected files, folders and globs into download requests.
+
+    Raises ValueError when a glob matches too many files.
+    """
+
+    def download_target(text: str) -> tuple[str, tuple[str, ...] | None] | None:
         text = clean_selection(text)
         if not text or "\x00" in text or is_open_url(text) or parse_remote_localhost(text):
             return None
@@ -437,23 +462,25 @@ def build_download_requests(
         candidate = Path(os.path.expanduser(text))
         if not candidate.is_absolute():
             candidate = Path(cwd, candidate)
-        if candidate.is_file():
-            return str(candidate.resolve())
+        if candidate.is_file() or candidate.is_dir():
+            return str(candidate.resolve()), None
+        if any(character in text for character in "*?["):
+            return glob_download_target(str(candidate))
         if text[0] in "\"'`" and text[-1] != text[0]:
             return None
         for variant in candidate_variants(text):
             resolved = resolve_path_candidate(variant, cwd)
-            if resolved and Path(resolved[0]).is_file():
-                return resolved[0]
+            if resolved and (Path(resolved[0]).is_file() or Path(resolved[0]).is_dir()):
+                return resolved[0], None
         return None
 
-    paths: list[str] = []
+    targets: list[tuple[str, tuple[str, ...] | None]] = []
     for line in selection.splitlines():
         if not line.strip():
             continue
-        path = file_path(line)
-        if path:
-            paths.append(path)
+        target = download_target(line)
+        if target:
+            targets.append(target)
             continue
         try:
             tokens = shlex.split(line)
@@ -462,19 +489,21 @@ def build_download_requests(
         if not tokens:
             return None
         for token in tokens:
-            path = file_path(token)
-            if path is None:
+            target = download_target(token)
+            if target is None:
                 return None
-            paths.append(path)
+            targets.append(target)
 
     requests: list[dict[str, object]] = []
-    for path in dict.fromkeys(paths):
+    for path, files in dict.fromkeys(targets):
         request: dict[str, object] = {
             "version": 1,
-            "action": "download_file",
+            "action": "download_folder" if files is not None or Path(path).is_dir() else "download_file",
             "path": path,
             "ask_destination": ask_destination,
         }
+        if files is not None:
+            request["files"] = list(files)
         if ssh_host:
             request["ssh_host"] = ssh_host
         requests.append(request)

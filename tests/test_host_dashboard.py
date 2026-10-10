@@ -415,3 +415,11 @@ def test_fake_curses_openers_view_cycles_and_saves_rules(monkeypatch: pytest.Mon
     assert saved[2]["rules"] == [{"pattern": "*.pdf", "opener": "download"}]
     assert any("*.pdf" in line and "Download" in line for line in screen.frames[-1])
     assert any("saved" in line for line in screen.frames[-1])
+
+
+def test_folder_transfers_show_trailing_slash_and_file_count() -> None:
+    line = dashboard.transfer_line({"path": "/runs/exp-42", "kind": "folder", "file_count": 12, "state": "downloading",
+                                    "bytes_received": 50, "size_bytes": 100, "ssh_host": "cluster"}, 100)
+    text = "".join(part for part, _style in line)
+    assert "exp-42/ (12 files)" in text
+    assert " 50% of 100 B" in text

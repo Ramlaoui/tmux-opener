@@ -139,8 +139,17 @@ Select a file path in copy mode and press:
 
 You can select several paths, one per line or separated by spaces. Quote paths
 containing spaces when combining them on one line. Relative paths use the tmux
-pane's working directory; `path:line:column` references are also accepted. Only
-existing files are downloaded; directories and URLs are rejected.
+pane's working directory; `path:line:column` references are also accepted. URLs
+are rejected.
+
+Folders download whole into `Downloads/NAME/`. A glob such as
+`runs/exp-42/*.png` (or `runs/**/metrics.csv`) is expanded on the remote host
+and downloads the matching files, at most 1000, into a folder named after the
+part before the first wildcard (`Downloads/exp-42/`), keeping subpaths. The
+client uses `rsync` when both machines have rsync 3, so a failed transfer
+resumes on retry; otherwise it streams `tar` over SSH and extracts it safely
+(entries escaping the folder are refused, links leaving it and device files are
+skipped, as with `rsync --safe-links`).
 
 Downloads run in the background over SSH using the same host alias as the bridge.
 The client needs working SSH authentication (an SSH key or agent); transfers

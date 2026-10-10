@@ -22,6 +22,7 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -29,7 +30,7 @@ import urllib.parse
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
@@ -49,6 +50,7 @@ REQUEST_TIMEOUT = 2.0
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_CONNECTIONS = 32
 MAX_LAUNCHES = 32
+MAX_FOLDER_FILES = 1000
 INSTANCE_ID = uuid.uuid4().hex
 STARTED_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
 LAST_REQUEST_AT: str | None = None
@@ -79,6 +81,8 @@ RESUME_SCRIPT = (
     'echo "$id"; '
     'if [ "$id" = "$3" ]; then exec tail -c +"$2" -- "$1"; else exec cat -- "$1"; fi'
 )
+ACTIVE_FOLDERS: set[Path] = set()
+ACTIVE_FOLDERS_LOCK = threading.Lock()
 
 
 class RequestError(Exception):
@@ -115,7 +119,7 @@ def ping_response(args: argparse.Namespace) -> dict[str, object]:
         "version": 1,
         "instance_id": INSTANCE_ID,
         "client": "tmux-opener-client",
-        "capabilities": ["remote_pdf", "download_status", "settings"],
+        "capabilities": ["remote_pdf", "download_status", "settings", "download_folder"],
         "pid": os.getpid(),
         "default_ssh_host": args.default_ssh_host,
         "allowed_ssh_hosts": sorted(args.allow_ssh_host),
@@ -184,7 +188,8 @@ def open_with_system(target: str, dry_run: bool, verbose: bool) -> None:
     launch_command(command, dry_run, verbose)
 
 
-def ssh_command(host: str, remote_command: str, ssh: str, ssh_config: str | None) -> list[str]:
+def ssh_transfer_command(ssh: str, ssh_config: str | None) -> list[str]:
+    """SSH options for client-built transfer commands; the host and remote command follow."""
     command = [ssh]
     if ssh_config is not None:
         command.extend(["-F", str(Path(ssh_config).expanduser())])
@@ -192,9 +197,13 @@ def ssh_command(host: str, remote_command: str, ssh: str, ssh_config: str | None
         "-T", "-S", "none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes",
         "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no",
         "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3", "--", host, remote_command,
+        "-o", "ServerAliveCountMax=3",
     ])
     return command
+
+
+def ssh_command(host: str, remote_command: str, ssh: str, ssh_config: str | None) -> list[str]:
+    return ssh_transfer_command(ssh, ssh_config) + ["--", host, remote_command]
 
 
 def remote_file_command(host: str, path: str, ssh: str, ssh_config: str | None) -> list[str]:
@@ -843,6 +852,19 @@ def choose_download_path(default: Path, cancel: threading.Event | None = None) -
     return destination
 
 
+def ask_download_path(default: Path, cancel: threading.Event | None) -> Path | None:
+    while not SAVE_DIALOG_LOCK.acquire(timeout=0.2):
+        if cancel is not None and cancel.is_set():
+            return None
+    try:
+        destination = choose_download_path(default, cancel) if cancel is not None else choose_download_path(default)
+    finally:
+        SAVE_DIALOG_LOCK.release()
+    if destination is not None and destination.exists():
+        raise RequestError(f"destination already exists; choose a new filename: {destination}")
+    return destination
+
+
 def download_notification(message: str) -> None:
     log_line("download failed; enable --verbose for details" if message.startswith("Download failed") else "download completed")
     if shutil.which("notify-send"):
@@ -974,18 +996,10 @@ def download_file(
         directory.mkdir(mode=0o700 if preview else 0o777, parents=True, exist_ok=True)
         destination = directory / Path(path).name
         if ask_destination:
-            while not SAVE_DIALOG_LOCK.acquire(timeout=0.2):
-                if cancel.is_set():
-                    return {"state": "cancelled"}
-            try:
-                destination = choose_download_path(destination, cancel)
-            finally:
-                SAVE_DIALOG_LOCK.release()
+            destination = ask_download_path(destination, cancel)
             if destination is None:
                 log_line(f"download cancelled: {host}:{path}" if verbose else "download cancelled")
                 return {"state": "cancelled"}
-            if destination.exists():
-                raise RequestError(f"destination already exists; choose a new filename: {destination}")
 
         # Partial copies live in a private cache keyed by host and path, so failed,
         # cancelled, interrupted and retried transfers continue where they stopped.
@@ -1064,10 +1078,236 @@ def download_file(
             temporary.unlink(missing_ok=True)
 
 
+class TransferCancelled(Exception):
+    pass
+
+
+def validate_folder_files(files: object) -> list[str] | None:
+    """Return glob matches as safe paths relative to the requested folder."""
+
+    if files is None:
+        return None
+    if not isinstance(files, list) or not 1 <= len(files) <= MAX_FOLDER_FILES:
+        raise RequestError(f"files must list 1 to {MAX_FOLDER_FILES} relative paths")
+    for name in files:
+        if (not isinstance(name, str) or not name or len(name) > 4096 or name.startswith("/")
+                or any(character in name for character in "\x00\r\n") or ".." in PurePosixPath(name).parts):
+            raise RequestError("files must be relative paths inside the folder")
+    return list(dict.fromkeys(files))
+
+
+def local_rsync() -> str | None:
+    # --protect-args needs rsync 3; macOS ships rsync 2.6.9 or openrsync.
+    rsync = shutil.which("rsync")
+    if rsync is None:
+        return None
+    try:
+        version = subprocess.run([rsync, "--version"], capture_output=True, text=True, check=False, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"rsync\s+version\s+v?(\d+)", version)
+    return rsync if match and int(match.group(1)) >= 3 else None
+
+
+def tree_size(root: Path) -> int:
+    total = 0
+    for directory, _directories, names in os.walk(root):
+        for name in names:
+            try:
+                info = os.lstat(os.path.join(directory, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+    return total
+
+
+def stop_on_cancel(process: subprocess.Popen[bytes], cancel: threading.Event) -> None:
+    def watch() -> None:
+        while process.poll() is None:
+            if cancel.wait(0.2):
+                terminate_process(process)
+                return
+
+    threading.Thread(target=watch, name="transfer-cancel", daemon=True).start()
+
+
+def rsync_folder(rsync: str, host: str, path: str, files: list[str] | None, partial: Path,
+                 ssh_command: list[str], cancel: threading.Event, progress) -> bool:
+    """Copy with rsync; return False when the remote host has no rsync."""
+
+    command = [rsync, "-rltE", "--safe-links", "--partial", "--protect-args", "-e", command_text(ssh_command)]
+    if files:
+        command += ["--files-from=-", "--from0"]
+    command += ["--", f"{host}:{path.rstrip('/')}/", f"{partial}/"]
+    with tempfile.TemporaryFile() as names, tempfile.TemporaryFile() as errors:
+        names.write(b"".join(name.encode("utf-8") + b"\0" for name in files or ()))
+        names.seek(0)
+        process = subprocess.Popen(command, stdin=names, stdout=subprocess.DEVNULL, stderr=errors)
+        stop_on_cancel(process, cancel)
+        while True:
+            try:
+                process.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if progress is not None:
+                    progress(bytes_received=tree_size(partial))
+        if cancel.is_set():
+            raise TransferCancelled
+        detail = process_stderr(errors)
+    if process.returncode in (12, 127) and "not found" in detail:
+        return False
+    if process.returncode:
+        raise RequestError(f"rsync exited {process.returncode}: {detail}" if detail else f"rsync exited {process.returncode}")
+    return True
+
+
+def tar_folder(host: str, path: str, files: list[str] | None, partial: Path,
+               ssh_command: list[str], cancel: threading.Event, progress, verbose: bool) -> None:
+    if not hasattr(tarfile, "data_filter"):
+        raise RequestError("folder downloads need rsync 3 or Python with tarfile filters on the client")
+    remote = f"tar -cf - -C {shlex.quote(path)} " + ("--null -T -" if files else ".")
+    with tempfile.TemporaryFile() as names, tempfile.TemporaryFile() as errors:
+        # "./" keeps names that start with "-" from reading as tar options.
+        names.write(b"".join(b"./" + name.encode("utf-8") + b"\0" for name in files or ()))
+        names.seek(0)
+        process = subprocess.Popen(ssh_command + ["--", host, remote], stdin=names,
+                                   stdout=subprocess.PIPE, stderr=errors)
+        stop_on_cancel(process, cancel)
+        received = 0
+        try:
+            with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+                for member in archive:
+                    try:
+                        archive.extract(member, partial, filter="data")
+                    except (tarfile.AbsoluteLinkError, tarfile.LinkOutsideDestinationError, tarfile.SpecialFileError):
+                        # Like rsync --safe-links: skip links leaving the folder, and device files.
+                        if verbose:
+                            log_line(f"skipped unsafe folder entry: {member.name}")
+                        continue
+                    except tarfile.FilterError as exc:
+                        raise RequestError(f"remote archive has an unsafe entry: {exc}") from exc
+                    if member.isfile():
+                        received += member.size
+                        if progress is not None:
+                            progress(bytes_received=received)
+            while process.stdout.read(256 * 1024):
+                pass
+        except (tarfile.TarError, OSError) as exc:
+            # Closing the pipe stops a sender that is still writing.
+            process.stdout.close()
+            process.wait()
+            if cancel.is_set():
+                raise TransferCancelled from exc
+            detail = process_stderr(errors) or str(exc)
+            raise RequestError(f"SSH tar exited {process.returncode}: {detail}") from exc
+        except BaseException:
+            terminate_process(process)
+            raise
+        finally:
+            process.stdout.close()
+        process.wait()
+        if cancel.is_set():
+            raise TransferCancelled
+        if process.returncode:
+            raise RequestError(f"SSH tar exited {process.returncode}: {process_stderr(errors)}")
+
+
+def download_folder(
+    host: str, path: str, files: list[str] | None, ask_destination: bool, ssh: str,
+    ssh_config: str | None = None, verbose: bool = False,
+    progress=None, cancel: threading.Event | None = None,
+) -> dict[str, object]:
+    """Copy a remote folder, or glob matches below it, into a new local folder.
+
+    Data lands in a hidden partial folder beside the destination and is renamed
+    into place when complete. rsync partials survive failures so a retry
+    resumes; cancellation removes them.
+    """
+
+    cancel = cancel or threading.Event()
+    partial: Path | None = None
+    keep_partial = False
+    try:
+        if cancel.is_set():
+            return {"state": "cancelled"}
+        directory = downloads_directory()
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / Path(path).name
+        if ask_destination:
+            destination = ask_download_path(destination, cancel)
+            if destination is None:
+                log_line(f"download cancelled: {host}:{path}" if verbose else "download cancelled")
+                return {"state": "cancelled"}
+        digest = hashlib.sha256(json.dumps([host, path, files]).encode("utf-8")).hexdigest()[:24]
+        candidate = destination.parent.resolve() / f".tmux-opener-{digest}.partial"
+        with ACTIVE_FOLDERS_LOCK:
+            if candidate in ACTIVE_FOLDERS:
+                raise RequestError("this folder is already downloading")
+            ACTIVE_FOLDERS.add(candidate)
+        partial = candidate
+        partial.mkdir(mode=0o700, exist_ok=True)
+
+        log_line(f"download started: {host}:{path} -> {destination}" if verbose else "download started")
+        if progress is not None:
+            progress(state="downloading", destination=str(destination))
+        ssh_command = ssh_transfer_command(ssh, ssh_config)
+        # rsync reads "host:path" and expands wildcards in remote paths even with --protect-args.
+        usable = ":" not in host and not host.startswith("-") and not any(character in path for character in "*?[\\")
+        rsync = local_rsync() if usable else None
+        keep_partial = rsync is not None
+        if rsync is None or not rsync_folder(rsync, host, path, files, partial, ssh_command, cancel, progress):
+            keep_partial = False
+            tar_folder(host, path, files, partial, ssh_command, cancel, progress, verbose)
+        received = tree_size(partial)
+
+        original = destination
+        index = 0
+        while True:
+            if cancel.is_set():
+                raise TransferCancelled
+            if not os.path.lexists(destination):
+                try:
+                    # rename() may replace an empty directory created meanwhile, never data.
+                    os.rename(partial, destination)
+                    break
+                except OSError as exc:
+                    if exc.errno not in (errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR):
+                        raise
+            if ask_destination:
+                raise RequestError(f"destination already exists: {destination}")
+            index += 1
+            destination = original.with_name(f"{original.name} ({index})")
+        message = f"Downloaded {host}:{path} to {destination}"
+        if verbose:
+            log_line(message)
+        download_notification(message)
+        return {"state": "completed", "destination": str(destination), "bytes_received": received, "error": None}
+    except TransferCancelled:
+        keep_partial = False
+        return {"state": "cancelled"}
+    except (OSError, RequestError) as exc:
+        message = f"Download failed for {host}:{path}: {exc}"
+        if verbose:
+            log_line(message)
+        download_notification(message)
+        return {"state": "failed", "error": str(exc)[:2000]}
+    finally:
+        if partial is not None:
+            if not keep_partial:
+                shutil.rmtree(partial, ignore_errors=True)
+            with ACTIVE_FOLDERS_LOCK:
+                ACTIVE_FOLDERS.discard(partial)
+
+
 def queue_download(host: str, path: str, args: argparse.Namespace, ask_destination: bool = False,
-                   size_bytes: object = None, preview: bool = False) -> dict[str, object] | None:
+                   size_bytes: object = None, preview: bool = False, kind: str = "file",
+                   files: object = None, file_count: object = None) -> dict[str, object] | None:
     if len(path) > 4096 or Path(path).name in ("", ".", "..") or any(character in path for character in "\r\n"):
-        raise RequestError("download path must name a file and contain no newlines")
+        raise RequestError(f"download path must name a {kind} and contain no newlines")
+    files = validate_folder_files(files) if kind == "folder" else None
+    if file_count is not None and (kind != "folder" or type(file_count) is not int or not 0 <= file_count <= 2**31):
+        raise RequestError("file_count must be a non-negative integer")
     if preview and Path(path).suffix.lower() not in opener_settings.PREVIEW_SUFFIXES:
         raise RequestError(f"local preview is not allowed for {Path(path).suffix or 'extensionless'} files")
     if size_bytes is not None and (type(size_bytes) is not int or not 0 <= size_bytes <= 2**63 - 1):
@@ -1079,7 +1319,8 @@ def queue_download(host: str, path: str, args: argparse.Namespace, ask_destinati
         log_line(f"dry-run download: {host}:{path} -> {destination}" if args.verbose else "dry-run download")
         return None
     try:
-        job = args.download_queue.submit(host, path, ask_destination, size_bytes, preview)
+        folder = {"kind": "folder", "files": files, "file_count": file_count} if kind == "folder" else {}
+        job = args.download_queue.submit(host, path, ask_destination, size_bytes, preview, **folder)
     except (ValueError, OSError) as exc:
         raise RequestError("download queue could not accept this transfer") from exc
     return {"download_id": job["id"], "state": "queued"}
@@ -1105,7 +1346,9 @@ def status_response(request: dict[str, object], args: argparse.Namespace) -> dic
         host = validate_host(host, None if args.allow_any_ssh_host else set(args.allow_ssh_host))
     downloads = args.download_queue.snapshot(host)
     allowed = None if args.allow_any_ssh_host else set(args.allow_ssh_host)
-    downloads = [job for job in downloads if allowed is None or job["ssh_host"] in allowed]
+    # Glob file lists stay in the history; status replies must stay small.
+    downloads = [{key: value for key, value in job.items() if key != "files"} for job in downloads
+                 if allowed is None or job["ssh_host"] in allowed]
     return {
         "client_info": {"hostname": platform.node(), "user": getpass.getuser(), "os": platform.system(),
                         "pid": os.getpid(), "instance_id": INSTANCE_ID, "default_ssh_host": args.default_ssh_host,
@@ -1162,7 +1405,8 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
             raise RequestError("download queue action failed") from exc
         return {"download_id": result["id"], "state": result["state"]}
 
-    if action in ("open_url", "open_vscode_remote", "open_remote_localhost", "open_remote_pdf", "download_file"):
+    if action in ("open_url", "open_vscode_remote", "open_remote_localhost", "open_remote_pdf", "download_file",
+                  "download_folder"):
         log_line(f"request action={action}")
 
     if action == "open_url":
@@ -1207,7 +1451,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
         )
         return
 
-    if action in ("open_remote_localhost", "open_remote_pdf", "download_file"):
+    if action in ("open_remote_localhost", "open_remote_pdf", "download_file", "download_folder"):
         if "ssh_host" not in request and args.default_ssh_host:
             request = {**request, "ssh_host": args.default_ssh_host}
         if args.allow_any_ssh_host:
@@ -1227,6 +1471,9 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
         ask_destination = request.get("ask_destination", False)
         if not isinstance(ask_destination, bool):
             raise RequestError("ask_destination must be a boolean")
+        if action == "download_folder":
+            return queue_download(host, path, args, ask_destination, request.get("size_bytes"), kind="folder",
+                                  files=request.get("files"), file_count=request.get("file_count"))
         return queue_download(host, path, args, ask_destination, request.get("size_bytes"))
 
     raise RequestError("unsupported action")
@@ -1458,6 +1705,10 @@ def bind_server(socket_path: str) -> OwnedServer:
 
 
 def transfer_job(job: dict, update, cancel: threading.Event, args: argparse.Namespace) -> dict[str, object]:
+    if job.get("kind") == "folder":
+        return download_folder(job["ssh_host"], job["path"], job.get("files"), job["ask_destination"],
+                               shutil.which("ssh") or "ssh", args.ssh_config, args.verbose,
+                               progress=update, cancel=cancel)
     preview = bool(job.get("preview"))
     result = download_file(
         job["ssh_host"], job["path"], job["ask_destination"], shutil.which("ssh") or "ssh",

@@ -113,6 +113,7 @@
     .ext.k-img { background: var(--info-soft); color: var(--info); border-color: transparent; }
     .ext.k-data { background: var(--good-soft); color: var(--good); border-color: transparent; }
     .ext.k-model { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+    .ext.k-dir { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
     .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sub { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12.5px; min-width: 0; margin-top: 2px; }
     .sub .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
@@ -388,11 +389,12 @@
       const transferRow = ({ client, download }) => {
         const k = kind(download);
         const row = el("div", "row");
-        row.append(extBadge(download.path));
+        const folder = download.kind === "folder";
+        row.append(folder ? el("div", "ext k-dir", "dir") : extBadge(download.path));
 
         const main = el("div");
         main.style.minWidth = "0";
-        const name = el("div", "name", basename(download.path) || text(download.id, "Download"));
+        const name = el("div", "name", `${basename(download.path) || text(download.id, "Download")}${folder ? "/" : ""}`);
         name.title = text(download.path, "");
         main.append(name);
         const sub = el("div", "sub");
@@ -402,6 +404,10 @@
           const resumed = el("span", "tag", "Resumed");
           resumed.title = `Continued from ${bytes(Number(download.resumed_from))} already received`;
           sub.append(resumed);
+        }
+        if (folder) {
+          const count = download.file_count;
+          sub.append(el("span", "tag", Number.isInteger(count) ? `${count} file${count === 1 ? "" : "s"}` : "Folder"));
         }
         const path = el("span", "path mono", `‎${download.destination && k === "completed" ? `→ ${download.destination}` : dirname(download.path)}`);
         path.title = download.destination ? `${download.path}\n→ ${download.destination}` : text(download.path, "");

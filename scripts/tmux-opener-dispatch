@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 
@@ -26,8 +27,18 @@ from tmux_opener_common import (
     is_open_url,
     log_line,
     resolve_path,
+    send_request,
     show_inline,
 )
+
+
+def folder_size(root: str, files: list[str] | None) -> tuple[int, int]:
+    """Return the bytes and count of regular files to transfer; links are copied as links."""
+
+    paths = [os.path.join(root, name) for name in files] if files else [
+        os.path.join(directory, name) for directory, _directories, names in os.walk(root) for name in names]
+    sizes = [info.st_size for info in map(os.lstat, paths) if stat.S_ISREG(info.st_mode)]
+    return sum(sizes), len(sizes)
 
 
 def default_fallback_mode() -> str:
@@ -213,13 +224,20 @@ def main() -> int:
     selection = clean_selection(raw_selection)
 
     if args.download or args.save_as:
-        requests = build_download_requests(raw_selection, args.cwd, args.ssh_host, ask_destination=args.save_as)
+        try:
+            requests = build_download_requests(raw_selection, args.cwd, args.ssh_host, ask_destination=args.save_as)
+        except ValueError as exc:
+            tmux_message(str(exc))
+            return 1
         if not requests:
-            tmux_message("select existing file paths to download (one per line or space-separated)")
+            tmux_message("select existing files, folders or globs to download (one per line or space-separated)")
             return 1
         for request in requests:
             try:
-                request["size_bytes"] = os.stat(str(request["path"])).st_size
+                if request["action"] == "download_folder":
+                    request["size_bytes"], request["file_count"] = folder_size(str(request["path"]), request.get("files"))
+                else:
+                    request["size_bytes"] = os.stat(str(request["path"])).st_size
             except OSError:
                 tmux_message("a selected file disappeared or is no longer readable")
                 return 1
@@ -232,6 +250,14 @@ def main() -> int:
         if not bridge_allowed(args.bridge_policy) or not bridge_available(args.socket, args.timeout):
             tmux_message(f"downloads require the local client bridge at {args.socket}")
             return 1
+        if any(request["action"] == "download_folder" for request in requests):
+            try:
+                capabilities = send_request(args.socket, {"version": 1, "action": "ping"}, args.timeout).get("capabilities")
+            except (OSError, ValueError):
+                capabilities = None
+            if not isinstance(capabilities, list) or "download_folder" not in capabilities:
+                tmux_message("the local client cannot download folders; update tmux-opener on the desktop")
+                return 1
         for request in requests:
             returncode = deliver_request(args.socket, request, args.timeout, log_path, "auto")
             if returncode:
