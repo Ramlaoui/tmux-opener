@@ -1,7 +1,7 @@
 # tmux-opener
 
 Open URLs and remote file paths from tmux copy mode on an SSH host using your
-local desktop browser or VS Code Remote-SSH.
+local desktop browser or VS Code Remote-SSH, or download files to your desktop.
 
 ## Contents
 
@@ -23,7 +23,7 @@ remote tmux selection
      no  -> same-host fallback opener
 ```
 
-The remote side sends structured JSON Open Requests. It never sends arbitrary
+The remote side sends structured JSON Open Requests and Download Requests. It never sends arbitrary
 shell commands for the local client to execute.
 
 ## Requirements
@@ -98,6 +98,40 @@ tmux-opener ssh --dry-run --no-start-client HOST
 Inside remote tmux copy mode, select a URL or path and press `o`. If `fzf` is
 installed, the prefix target picker also uses `o` by default.
 
+Select a file path in copy mode and press:
+
+- `d` to download it into the **client machine's Downloads folder** (honoring
+  Linux's XDG Downloads setting).
+- `D` to choose where to save it using a **save dialog on the client machine**.
+
+You can select several paths, one per line or separated by spaces. Quote paths
+containing spaces when combining them on one line. Relative paths use the tmux
+pane's working directory; `path:line:column` references are also accepted. Only
+existing files are downloaded; directories and URLs are rejected.
+
+Downloads run in the background over SSH using the same host alias as the bridge.
+The client needs working SSH authentication (an SSH key or agent); transfers
+cannot prompt for a password. The tmux message means the download was queued.
+Completion and errors appear in the client log and, when `notify-send` is
+available, desktop notifications. Default logs omit paths and SSH stderr;
+enable client `--verbose` for transfer details. Transfers honor the client's
+custom SSH config and disable inherited forwards and shared connections.
+Files appear at their destination only after
+a successful transfer. `d` adds ` (1)`, ` (2)`, etc. if a name already exists.
+For `D`, choose a new filename; existing files are preserved. With several paths,
+`D` asks once per file. Canceling a dialog skips that file.
+
+On macOS, `D` uses the native save dialog. On Linux it uses `zenity` or `kdialog`,
+with Python Tk as a fallback. Windows uses Python Tk. Downloads require the
+client bridge; they do not use the same-host opener fallback.
+
+After updating both installations, restart the client with
+`tmux-opener restart-client HOST` and reload the tmux plugin:
+
+```sh
+tmux run-shell ~/.tmux/plugins/tmux-opener/tmux-opener.tmux
+```
+
 Remote localhost URLs are treated as remote services, not local desktop
 services. For example:
 
@@ -136,6 +170,7 @@ tmux-opener uninstall-host HOST
 Defaults:
 
 - Copy-mode key: `o`
+- Copy-mode download keys: `d` (Downloads), `D` (save dialog)
 - Prefix target picker key: `o`
 - Remote socket: `/tmp/tmux-opener-$USER.sock`
 - Remote folders open in a new VS Code Remote-SSH window
@@ -149,6 +184,8 @@ Common tmux options:
 
 ```tmux
 set -g @tmux_opener_key 'o'
+set -g @tmux_opener_download_key 'd'
+set -g @tmux_opener_save_as_key 'D'
 set -g @tmux_opener_picker_key 'o'
 set -g @tmux_opener_fallback 'auto' # or local, command, none
 ```
