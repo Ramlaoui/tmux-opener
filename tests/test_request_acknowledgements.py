@@ -84,6 +84,19 @@ def test_pdf_rejection_reports_the_client_reason_without_logging_it(tmp_path, ca
     assert "/private/paper.pdf" not in log.read_text()
 
 
+@pytest.mark.parametrize("reply,reason", [
+    (b"", "bridge closed before acknowledgement"),
+    (b'{broken}\n', "invalid bridge acknowledgement"),
+])
+def test_pdf_transport_failure_is_visible_to_neovim(reply, reason, capsys):
+    request = {"version": 1, "action": "open_remote_pdf", "path": "/private/paper.pdf", "refresh": True}
+    with responder([reply]) as path:
+        assert deliver_request(path, request, 1, None, "none") == 1
+    error = capsys.readouterr().err
+    assert "tmux-opener:" in error
+    assert reason in error
+
+
 @pytest.mark.parametrize("consumer", ["local-health", "remote-dispatch"])
 def test_delayed_healthy_client_is_not_treated_as_unavailable(consumer):
     root = Path(__file__).resolve().parents[1]
