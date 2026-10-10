@@ -72,6 +72,18 @@ def test_delivery_log_excludes_request_and_response_secrets(tmp_path, accepted):
     assert log.stat().st_mode & 0o777 == 0o600
 
 
+def test_pdf_rejection_reports_the_client_reason_without_logging_it(tmp_path, capsys):
+    error = "Sioyek reload failed (TimeoutExpired)"
+    request = {"version": 1, "action": "open_remote_pdf", "path": "/private/paper.pdf", "refresh": True}
+    reply = json.dumps({"ok": False, "error": error}).encode() + b"\n"
+    log = tmp_path / "sender.log"
+    with responder([reply]) as path:
+        assert deliver_request(path, request, 1, str(log), "none") == 1
+    assert capsys.readouterr().err == f"tmux-opener: {error}\n"
+    assert error not in log.read_text()
+    assert "/private/paper.pdf" not in log.read_text()
+
+
 @pytest.mark.parametrize("consumer", ["local-health", "remote-dispatch"])
 def test_delayed_healthy_client_is_not_treated_as_unavailable(consumer):
     root = Path(__file__).resolve().parents[1]

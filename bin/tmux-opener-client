@@ -264,7 +264,7 @@ def open_remote_pdf(request: dict[str, object], allowed_hosts: set[str] | None, 
                 raise RequestError("Sioyek is not installed")
             try:
                 result = subprocess.run(
-                    [executable, "--nofocus", "--new-window", str(local_pdf), "--execute-command", "reload"],
+                    [executable, "--nofocus", str(local_pdf), "--execute-command", "reload"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                     timeout=5, check=False,
                 )

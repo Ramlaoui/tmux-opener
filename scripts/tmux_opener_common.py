@@ -629,6 +629,8 @@ def deliver_request(
     if not response.get("ok", False):
         error = response.get("error", "request rejected")
         log_line(log_path, f"send rejected: {describe_request(request)}")
+        if fallback == "none" and request.get("action") == "open_remote_pdf":
+            print(f"tmux-opener: {error}", file=sys.stderr)
         return fallback_message(request, str(error), fallback)
 
     log_line(log_path, f"send ok: socket={socket_path} {describe_request(request)}")
