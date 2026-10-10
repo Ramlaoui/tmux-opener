@@ -104,7 +104,6 @@ def test_line_and_column_suffixes_are_removed_from_each_file(tmp_path: Path) -> 
     "selection",
     [
         "https://example.test/archive.zip",
-        "downloads",
         "missing.txt",
     ],
 )

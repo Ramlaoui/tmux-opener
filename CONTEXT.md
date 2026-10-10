@@ -21,12 +21,14 @@ A structured statement of intent to open a URL or a remote file path. It is data
 _Avoid_: open command, shell snippet
 
 **Download Request**:
-A structured request to copy a remote regular file to the client machine. The
-Local Opener Client owns the destination: its Downloads folder, or a location
-selected in a local save dialog. An acknowledgement means the transfer was
-queued; completion is reported by the client. The client applies the same SSH
-host allowlist as remote editor requests and constructs the fixed SSH file-read
-command itself.
+A structured request to copy a remote regular file, a folder, or glob matches
+below a folder to the client machine. The Remote Opener Plugin expands globs and
+sends the matches as relative paths, never as patterns. The Local Opener Client
+owns the destination: its Downloads folder, or a location selected in a local
+save dialog. An acknowledgement means the transfer was queued; completion is
+reported by the client. The client applies the same SSH host allowlist as remote
+editor requests and constructs the fixed SSH file-read, rsync or tar command
+itself.
 
 **Download Queue**:
 The Local Opener Client's persistent records and bounded transfer workers. Each
