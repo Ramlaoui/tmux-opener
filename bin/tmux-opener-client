@@ -122,7 +122,7 @@ def ping_response(args: argparse.Namespace) -> dict[str, object]:
         "version": 1,
         "instance_id": INSTANCE_ID,
         "client": "tmux-opener-client",
-        "capabilities": ["remote_pdf", "download_status", "settings", "download_folder"],
+        "capabilities": ["remote_pdf", "download_status", "settings", "download_folder", "restart_client"],
         "pid": os.getpid(),
         "default_ssh_host": args.default_ssh_host,
         "allowed_ssh_hosts": sorted(args.allow_ssh_host),
@@ -1361,6 +1361,7 @@ def status_response(request: dict[str, object], args: argparse.Namespace) -> dic
                   if (host is None or key == host) and (allowed is None or key in allowed)],
         "downloads": downloads,
         "history_error": args.download_queue.storage_error,
+        "can_restart": not getattr(args, "once", False) and not args.dry_run,
         "remote_localhost_forwards": active_remote_localhost_forwards(),
     }
 
@@ -1376,6 +1377,13 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
     observe_host(request, args)
     if action == "get_status":
         return status_response(request, args)
+    if action == "restart_client":
+        if getattr(args, "once", False) or args.dry_run:
+            raise RequestError("this client cannot restart in once or dry-run mode")
+        if request.get("instance_id") != INSTANCE_ID:
+            raise RequestError("client instance changed; refresh before restarting")
+        log_line("client restart requested")
+        return {"restart_accepted": True}
     if action == "get_settings":
         settings, error = opener_settings.load()
         return {"settings": settings, "error": error, "path": str(opener_settings.settings_path()),
@@ -1490,6 +1498,7 @@ class Peer:
     deadline: float
     response: bytes | None = None
     sent: int = 0
+    restart: bool = False
 
 
 def serve(server: socket.socket, args: argparse.Namespace, stop: threading.Event) -> None:
@@ -1516,6 +1525,7 @@ def serve(server: socket.socket, args: argparse.Namespace, stop: threading.Event
             def respond(peer: Peer, response: dict[str, object]) -> None:
                 peer.data.clear()
                 peer.response = json.dumps(response, separators=(",", ":")).encode("utf-8") + b"\n"
+                peer.restart = response.get("restart_accepted") is True and response.get("ok") is True
                 peer.deadline = time.monotonic() + REQUEST_TIMEOUT
                 try:
                     selector.modify(peer.conn, selectors.EVENT_WRITE, peer)
@@ -1567,6 +1577,9 @@ def serve(server: socket.socket, args: argparse.Namespace, stop: threading.Event
                             if peer.response is not None:
                                 count = peer.conn.send(memoryview(peer.response)[peer.sent:])
                                 peer.sent += count
+                                if peer.restart and peer.sent == len(peer.response):
+                                    args.restart_requested = True
+                                    stop.set()
                                 if count == 0 or peer.sent == len(peer.response):
                                     close_peer(peer)
                                 continue
@@ -1790,6 +1803,11 @@ def main() -> int:
         stop_remote_localhost_forwards()
         server.cleanup()
 
+    if getattr(args, "restart_requested", False):
+        # Re-exec the owned process after its response and normal cleanup.
+        # The service manager keeps supervising the same process and all CLI
+        # options (socket, allowlist, SSH config and viewer policies) survive.
+        os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]])
     return 0
 
 

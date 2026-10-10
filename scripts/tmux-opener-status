@@ -381,7 +381,7 @@ def _header(title: str, right: str, width: int) -> Line:
 
 def _tabs(view: str) -> Line:
     line: Line = [(" ", "")]
-    for name, label in (("transfers", "Transfers"), ("openers", "Openers")):
+    for name, label in (("transfers", "Transfers"), ("clients", "Clients"), ("openers", "Openers")):
         line += [(f" {label} ", "tab-on" if name == view else "dim"), (" ", "")]
     return line + [("  tab to switch", "dim")]
 
@@ -607,6 +607,69 @@ def render_transfers_view(
     filler: list[Line] = [[] for _ in range(max(available - len(visible), 0))]
     below: Line = [(f"   {GLYPHS['down']} {hidden_below} more", "dim")] if hidden_below > 0 else []
     return (top + visible + [below] + details + filler + [footer])[: max(height, 0)]
+
+
+def dashboard_clients(snapshot: Mapping[str, object], socket_path: str | None) -> list[dict[str, object]]:
+    clients = snapshot.get("clients")
+    if isinstance(clients, list):
+        return [client for client in clients if isinstance(client, dict)]
+    info = snapshot.get("client_info")
+    if not isinstance(info, dict):
+        return []
+    return [{"host": info.get("default_ssh_host") or "Desktop", "socket": socket_path or default_socket_path(),
+             "online": True, "can_restart": snapshot.get("can_restart") is True, "client_info": info}]
+
+
+def restart_dashboard_clients(clients: list[dict[str, object]], timeout: float) -> str:
+    accepted = 0
+    errors = []
+    for client in clients:
+        info = client.get("client_info", {})
+        instance = info.get("instance_id") if isinstance(info, dict) else None
+        path = client.get("socket")
+        if client.get("online") is not True or client.get("can_restart") is not True or not instance or not isinstance(path, str):
+            errors.append(f"{client.get('host')}: client offline or restart unsupported")
+            continue
+        try:
+            response = send_request(path, {"version": 1, "action": "restart_client", "instance_id": instance}, timeout)
+            if response.get("ok") is not True or response.get("restart_accepted") is not True:
+                raise StatusError(str(response.get("error") or "restart was not acknowledged"))
+            accepted += 1
+        except (OSError, ValueError, StatusError) as exc:
+            errors.append(f"{client.get('host')}: {sanitize_terminal_text(exc)}")
+    return f"restart requested for {accepted} client(s)" + ("; " + "; ".join(errors) if errors else "")
+
+
+def render_clients_view(clients: list[dict[str, object]], *, title: str, selected: int,
+                        width: int, height: int, message: str | None = None) -> list[Line]:
+    lines = [_header(title, "clients", width), _tabs("clients"), [],
+             [(" CLIENTS ", "label"), (" desktop opener processes; remote reports are recent activity", "dim")], []]
+    selected = min(selected, max(len(clients) - 1, 0))
+    available = max(height - 12, 1)
+    first = max(selected - available + 1, 0)
+    for index, client in enumerate(clients[first:first + available], first):
+        online = client.get("online") is True
+        info = client.get("client_info", {})
+        info = info if isinstance(info, dict) else {}
+        name = _optional_text(client.get("host"))
+        detail = f"{_optional_text(info.get('user'))}@{_optional_text(info.get('hostname'))} · pid {_optional_text(info.get('pid'))}" if online else _optional_text(client.get("error") or "not responding")
+        lines.append([(" > " if index == selected else "   ", "key"),
+                      (_clip(name, 18).ljust(18), "bold"),
+                      (" online  " if online else " offline ", "good" if online else "dim"),
+                      (_clip(detail, max(width - 33, 0)), "")])
+    if not clients:
+        lines.append([("   no desktop clients configured", "dim")])
+    else:
+        client = clients[selected]
+        info = client.get("client_info", {})
+        info = info if isinstance(info, dict) else {}
+        lines += [[], [(" Socket  ", "label"), (_clip(client.get("socket"), max(width - 10, 0)), "mono")],
+                  [(" Started ", "label"), (_ago(info.get("started_at")), "")],
+                  [(" Activity", "label"), (" " + _ago(info.get("last_request_at")), "")]]
+    lines += [[], [(" Restart interrupts transfers; retry partial copies from Transfers.", "dim")]]
+    lines += [[] for _ in range(max(height - len(lines) - 1, 0))]
+    lines.append(_hints([("tab", "switch"), ("j/k", "select"), ("r", "restart"), ("R", "restart all online"), ("q", "quit")], message))
+    return lines[:height]
 
 
 def opener_items(settings: Mapping[str, object]) -> int:
@@ -847,6 +910,7 @@ def run_live_dashboard(
     selected = 0
     selected_id: object = None
     opener_selected = 0
+    client_selected = 0
     settings_state: dict[str, object] | None = None
     error: str | None = None
     message: str | None = None
@@ -887,6 +951,9 @@ def run_live_dashboard(
         elif view == "openers":
             draw(screen, render_openers_view(settings_state, title=title, selected=opener_selected, width=width,
                                              height=height, message=message), styles)
+        elif view == "clients" and snapshot is not None:
+            draw(screen, render_clients_view(dashboard_clients(snapshot, socket_path), title=title,
+                                             selected=client_selected, width=width, height=height, message=message), styles)
         elif snapshot is not None:
             lines = render_transfers_view(snapshot, ssh_host=ssh_host, pane=pane, selected=selected, width=width,
                                           height=height, message=message)
@@ -905,9 +972,20 @@ def run_live_dashboard(
             continue
         message = None
         if key == 9:  # tab
-            view = "openers" if view == "transfers" else "transfers"
+            views = ("transfers", "clients", "openers")
+            view = views[(views.index(view) + 1) % len(views)]
             if view == "openers":
                 settings_state = load_settings()
+            continue
+        if view == "clients" and snapshot is not None:
+            clients = dashboard_clients(snapshot, socket_path)
+            client_selected = min(client_selected, max(len(clients) - 1, 0))
+            if clients and key in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j")):
+                client_selected = (client_selected + (-1 if key in (curses.KEY_UP, ord("k")) else 1)) % len(clients)
+            elif clients and key in (ord("r"), ord("R")):
+                targets = [clients[client_selected]] if key == ord("r") else [client for client in clients if client.get("can_restart") is True]
+                message = restart_dashboard_clients(targets, timeout)
+                force_refresh = True
             continue
         if view == "openers":
             settings = settings_state.get("settings") if settings_state else None

@@ -178,8 +178,9 @@ Press **prefix + `O`** (capital O) on the host to open the live tmux dashboard.
 It shows the desktop client's machine, user, OS and process, the current remote
 host/pane information, and recent downloads with progress bars. Use the arrow
 keys or `j`/`k` to select a download, `c` to cancel it, `r` to retry a failed,
-cancelled or interrupted transfer, `Tab` to switch to the
-[Openers](#opener-rules) view, and `q` to close the popup. Configure the
+cancelled or interrupted transfer, `Tab` to cycle through Transfers, Clients and
+[Openers](#opener-rules), and `q` to close the popup. In Clients, use `r` to
+restart the selected client or `R` to restart all online clients shown. Configure the
 shortcut with:
 
 ```tmux
@@ -201,6 +202,14 @@ cancel/retry actions, plus a Clients page and an Openers settings page. It polls
 managed SSH snippets, and displays configured offline clients. `--no-browser`
 prints its local URL instead of opening a browser. Keep the command running
 while using the page; Ctrl-C closes the dashboard server.
+
+The Clients page shows the desktop process and recent host activity, with
+**Restart client** and **Restart all online clients** controls. The local
+dashboards manage all discovered desktop clients; a remote tmux dashboard
+manages only the client reached through its forwarded bridge. Offline and older
+clients remain visible but cannot be restarted through the dashboard. Restarts
+preserve startup options and native service supervision. Active transfers are
+interrupted; retry them from Transfers to resume available partial copies.
 
 The desktop can use the same **prefix + `O`** shortcut. Add this to the local
 desktop's `.tmux.conf` after installing the client archive:

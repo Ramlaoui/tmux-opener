@@ -41,6 +41,27 @@ def test_viewer_keyboard_selection_skips_uninstalled_apps():
     assert changed and settings["pdf_viewer"] == "sioyek"
 
 
+def test_clients_tab_restarts_selected_and_all_online_clients(monkeypatch):
+    info = {"instance_id": "first-instance", "pid": 123, "hostname": "desktop", "user": "alice"}
+    entries = [{"host": "first", "socket": "/tmp/first.sock", "online": True, "can_restart": True, "client_info": info},
+               {"host": "offline", "socket": "/tmp/offline.sock", "online": False, "can_restart": False, "client_info": {}}]
+    snapshot = {**status_response(), "clients": entries}
+    calls = []
+    monkeypatch.setattr(dashboard, "request_local_status", lambda *args, **kwargs: snapshot)
+    monkeypatch.setattr(dashboard, "send_request", lambda path, payload, timeout: calls.append((path, payload)) or {"ok": True, "restart_accepted": True})
+    screen = FakeScreen(height=24, width=100, keys=[9, ord("r"), ord("R"), ord("q")])
+    dashboard.run_live_dashboard(screen, socket_path=None, cwd="/tmp", pane=None, ssh_host=None, timeout=1, local=True)
+    assert len(calls) == 2
+    assert all(path == "/tmp/first.sock" and payload["instance_id"] == "first-instance" for path, payload in calls)
+    assert any("Restart interrupts transfers" in line for frame in screen.frames for line in frame)
+
+
+def test_remote_clients_tab_only_exposes_its_connected_desktop():
+    snapshot = {**status_response(), "can_restart": True}
+    entries = dashboard.dashboard_clients(snapshot, "/tmp/forwarded.sock")
+    assert len(entries) == 1 and entries[0]["socket"] == "/tmp/forwarded.sock"
+
+
 def status_response() -> dict[str, object]:
     return {
         "ok": True,
@@ -404,7 +425,7 @@ def test_fake_curses_openers_view_cycles_and_saves_rules(monkeypatch: pytest.Mon
     monkeypatch.setattr(dashboard, "request_status", lambda *args, **kwargs: status_response())
     monkeypatch.setattr(dashboard, "request_settings", lambda *args: json.loads(json.dumps(stored)))
     monkeypatch.setattr(dashboard, "save_settings", save)
-    keys = [9, curses.KEY_RIGHT, ord("J"), curses.KEY_UP, ord("x"), ord("q")]
+    keys = [9, 9, curses.KEY_RIGHT, ord("J"), curses.KEY_UP, ord("x"), ord("q")]
     screen = FakeScreen(height=24, width=100, keys=keys)
 
     dashboard.run_live_dashboard(screen, socket_path="/tmp/status.sock", cwd="/tmp/work", pane="%9",
