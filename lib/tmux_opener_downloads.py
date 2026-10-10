@@ -119,7 +119,7 @@ class DownloadQueue:
             record = self._find(identifier, host)
             if record["state"] not in TERMINAL_STATES:
                 self.cancel_events[identifier].set()
-                # Active workers remove their temporary files before reporting cancelled.
+                # Active workers keep their partial copy so a retry resumes it.
                 if record["state"] == "queued":
                     record.update(state="cancelled", updated_at=timestamp())
                     self._save()

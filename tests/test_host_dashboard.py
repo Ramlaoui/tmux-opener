@@ -181,6 +181,14 @@ def test_rendering_sanitizes_terminal_controls_and_shows_recent_host_label() -> 
     assert "result[31m.csv" in rendered
     assert "source  cluster:/scratch/result[31m.csv" in rendered
     assert "TRANSFERS  1 active" in rendered
+    assert "resumed at" not in rendered
+
+
+def test_detail_block_shows_where_a_transfer_resumed() -> None:
+    snapshot = status_response()
+    snapshot["downloads"][0]["resumed_from"] = 256
+    rendered = "\n".join(dashboard.render_snapshot_lines(snapshot))
+    assert "resumed at 256 B" in rendered
 
 
 def test_action_requests_use_the_same_socket_and_download_id() -> None:

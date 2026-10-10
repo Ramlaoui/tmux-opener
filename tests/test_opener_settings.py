@@ -130,7 +130,8 @@ def test_rules_route_remote_files_to_preview_or_download(client: dict[str, Any],
 
 def test_preview_download_refreshes_a_private_cache_copy(client: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake_ssh = tmp_path / "ssh"
-    fake_ssh.write_text("#!/bin/sh\nprintf '%s' \"$PAYLOAD\"\n")
+    # Answer the resume script with a "size mtime" identity line, then the bytes.
+    fake_ssh.write_text("#!/bin/sh\nprintf '%s 0\\n%s' \"${#PAYLOAD}\" \"$PAYLOAD\"\n")
     fake_ssh.chmod(0o755)
     notified: list[str] = []
     monkeypatch.setitem(client["download_file"].__globals__, "download_notification", notified.append)

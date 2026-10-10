@@ -398,6 +398,11 @@
         const sub = el("div", "sub");
         sub.append(el("span", "host", text(download.ssh_host || client.host, "local")));
         if (download.preview) sub.append(el("span", "tag", "Preview"));
+        if (Number(download.resumed_from) > 0) {
+          const resumed = el("span", "tag", "Resumed");
+          resumed.title = `Continued from ${bytes(Number(download.resumed_from))} already received`;
+          sub.append(resumed);
+        }
         const path = el("span", "path mono", `‎${download.destination && k === "completed" ? `→ ${download.destination}` : dirname(download.path)}`);
         path.title = download.destination ? `${download.path}\n→ ${download.destination}` : text(download.path, "");
         sub.append(path);

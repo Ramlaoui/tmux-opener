@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import runpy
 import shlex
+import shutil
 import socket
 import threading
 import time
@@ -26,6 +29,8 @@ def write_fake_ssh(path: Path) -> Path:
         """#!/usr/bin/env python3
 import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -42,7 +47,19 @@ if os.environ.get("TMUX_OPENER_FAKE_SSH_FAIL"):
     sys.stderr.buffer.write(b"remote cat failed\\n")
     raise SystemExit(17)
 
-sys.stdout.buffer.write(bytes.fromhex(os.environ.get("TMUX_OPENER_FAKE_SSH_BYTES", "")))
+# Run the real remote script locally: `sh -c SCRIPT sh PATH OFFSET IDENTITY`.
+argv = shlex.split(sys.argv[-1])
+argv[4] = os.environ["TMUX_OPENER_FAKE_SSH_FILE"]
+result = subprocess.run(argv, stdout=subprocess.PIPE, check=False)
+drops = Path(os.environ.get("TMUX_OPENER_FAKE_SSH_DROPS", "/nonexistent"))
+if drops.exists() and int(drops.read_text()) > 0:
+    # Simulate a dropped connection after the identity line and four bytes.
+    drops.write_text(str(int(drops.read_text()) - 1))
+    header, _, body = result.stdout.partition(b"\\n")
+    sys.stdout.buffer.write(header + b"\\n" + body[:4])
+    raise SystemExit(255)
+sys.stdout.buffer.write(result.stdout)
+raise SystemExit(result.returncode)
 """,
         encoding="utf-8",
     )
@@ -57,11 +74,16 @@ def configure_fake_ssh(
     payload: bytes = b"",
     fail: bool = False,
     gate: Path | None = None,
+    drops: int = 0,
 ) -> tuple[Path, Path]:
     fake_ssh = write_fake_ssh(tmp_path / "fake-ssh")
     capture = tmp_path / "ssh-argv.json"
+    remote = tmp_path / "remote-file"
+    remote.write_bytes(payload)
+    (tmp_path / "drops").write_text(str(drops))
     monkeypatch.setenv("TMUX_OPENER_FAKE_SSH_CAPTURE", str(capture))
-    monkeypatch.setenv("TMUX_OPENER_FAKE_SSH_BYTES", payload.hex())
+    monkeypatch.setenv("TMUX_OPENER_FAKE_SSH_FILE", str(remote))
+    monkeypatch.setenv("TMUX_OPENER_FAKE_SSH_DROPS", str(tmp_path / "drops"))
     monkeypatch.delenv("TMUX_OPENER_FAKE_SSH_FAIL", raising=False)
     monkeypatch.delenv("TMUX_OPENER_FAKE_SSH_GATE", raising=False)
     if fail:
@@ -69,6 +91,12 @@ def configure_fake_ssh(
     if gate is not None:
         monkeypatch.setenv("TMUX_OPENER_FAKE_SSH_GATE", str(gate))
     return fake_ssh, capture
+
+
+@pytest.fixture(autouse=True)
+def private_cache(monkeypatch: Any, tmp_path: Path) -> Path:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    return tmp_path / "cache"
 
 
 def patch_downloads(client: dict[str, Any], monkeypatch: Any, directory: Path) -> None:
@@ -129,9 +157,7 @@ def test_download_file_preserves_bytes_and_quotes_remote_metacharacters(
     assert destination.read_bytes() == payload
     argv = json.loads(capture.read_text(encoding="utf-8"))
     assert argv[-2] == "devbox"
-    assert argv[-1] == (
-        f"test -f {shlex.quote(remote_path)} && cat -- {shlex.quote(remote_path)}"
-    )
+    assert shlex.split(argv[-1]) == ["sh", "-c", client["RESUME_SCRIPT"], "sh", remote_path, "1", ""]
 
 
 def test_download_file_isolates_ssh_and_honors_custom_config(
@@ -237,7 +263,7 @@ def test_choose_download_path_cancellation_does_not_start_ssh(
     monkeypatch.setitem(
         client["download_file"].__globals__,
         "choose_download_path",
-        lambda _default: None,
+        lambda _default, _cancel: None,
     )
 
     client["download_file"]("devbox", "/remote/cancelled.bin", True, str(fake_ssh))
@@ -259,7 +285,7 @@ def test_chosen_download_path_writes_bytes_and_rejects_existing_destination(
     monkeypatch.setitem(
         client["download_file"].__globals__,
         "choose_download_path",
-        lambda _default: chosen,
+        lambda _default, _cancel: chosen,
     )
 
     client["download_file"]("devbox", "/remote/result.bin", True, str(fake_ssh))
@@ -419,3 +445,138 @@ def test_download_dispatch_is_async_while_ping_remains_responsive(
         server_thread.join(timeout=2)
         download_queue.close()
     assert not server_thread.is_alive()
+
+
+def resume_offset(capture: Path) -> str:
+    return shlex.split(json.loads(capture.read_text(encoding="utf-8"))[-1])[5]
+
+
+def test_dropped_connection_resumes_from_the_partial_copy(monkeypatch: Any, tmp_path: Path, private_cache: Path) -> None:
+    client = load_client()
+    downloads = tmp_path / "Downloads"
+    patch_downloads(client, monkeypatch, downloads)
+    monkeypatch.setitem(client["download_file"].__globals__, "RESUME_DELAYS", (0, 0))
+    payload = bytes(range(256)) * 4
+    fake_ssh, capture = configure_fake_ssh(monkeypatch, tmp_path, payload=payload, drops=2)
+    events: list[dict[str, object]] = []
+
+    result = client["download_file"]("devbox", "/remote/model.ckpt", False, str(fake_ssh),
+                                     progress=lambda **fields: events.append(fields))
+
+    assert result["state"] == "completed"
+    assert (downloads / "model.ckpt").read_bytes() == payload
+    assert [event["resumed_from"] for event in events if "resumed_from" in event] == [None, 4, 8]
+    assert resume_offset(capture) == "9"
+    assert list((private_cache / "tmux-opener" / "partial").iterdir()) == []
+
+
+def test_queue_retry_resumes_a_failed_download(monkeypatch: Any, tmp_path: Path) -> None:
+    client = load_client()
+    downloads = tmp_path / "Downloads"
+    patch_downloads(client, monkeypatch, downloads)
+    monkeypatch.setitem(client["download_file"].__globals__, "RESUME_DELAYS", ())
+    payload = b"0123456789" * 10
+    fake_ssh, capture = configure_fake_ssh(monkeypatch, tmp_path, payload=payload, drops=1)
+    download_queue = client["DownloadQueue"](
+        tmp_path / "history.json",
+        lambda job, update, cancel: client["download_file"](
+            job["ssh_host"], job["path"], False, str(fake_ssh), progress=update, cancel=cancel),
+    )
+
+    def finished(identifier: str) -> dict[str, object]:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            record = next(row for row in download_queue.snapshot() if row["id"] == identifier)
+            if record["state"] in ("completed", "failed"):
+                return record
+            time.sleep(0.01)
+        raise AssertionError("download did not finish")
+
+    try:
+        failed = finished(download_queue.submit("devbox", "/remote/run.log", False)["id"])
+        assert failed["state"] == "failed"
+        assert failed["bytes_received"] == 4
+        retried = finished(download_queue.retry(failed["id"], "devbox")["id"])
+    finally:
+        download_queue.close()
+    assert retried["state"] == "completed"
+    assert retried["resumed_from"] == 4
+    assert retried["bytes_received"] == retried["size_bytes"] == len(payload)
+    assert resume_offset(capture) == "5"
+    assert (downloads / "run.log").read_bytes() == payload
+
+
+def test_changed_remote_file_discards_the_partial_copy(monkeypatch: Any, tmp_path: Path) -> None:
+    client = load_client()
+    downloads = tmp_path / "Downloads"
+    patch_downloads(client, monkeypatch, downloads)
+    monkeypatch.setitem(client["download_file"].__globals__, "RESUME_DELAYS", ())
+    fake_ssh, _capture = configure_fake_ssh(monkeypatch, tmp_path, payload=b"old contents", drops=1)
+    assert client["download_file"]("devbox", "/remote/data.csv", False, str(fake_ssh))["state"] == "failed"
+
+    # Same size, newer mtime: the identity no longer matches.
+    remote = tmp_path / "remote-file"
+    remote.write_bytes(b"new contents")
+    os.utime(remote, (remote.stat().st_atime, remote.stat().st_mtime + 10))
+    events: list[dict[str, object]] = []
+    result = client["download_file"]("devbox", "/remote/data.csv", False, str(fake_ssh),
+                                     progress=lambda **fields: events.append(fields))
+
+    assert result["state"] == "completed"
+    assert (downloads / "data.csv").read_bytes() == b"new contents"
+    assert [event["resumed_from"] for event in events if "resumed_from" in event] == [None]
+
+
+def test_resume_script_falls_back_to_bsd_stat(monkeypatch: Any, tmp_path: Path) -> None:
+    client = load_client()
+    downloads = tmp_path / "Downloads"
+    patch_downloads(client, monkeypatch, downloads)
+    monkeypatch.setitem(client["download_file"].__globals__, "RESUME_DELAYS", (0,))
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "stat").write_text(
+        "#!/bin/sh\n"
+        f'[ "$1" = -f ] && [ "$2" = "%z %m" ] && exec {shutil.which("stat")} -c "%s %Y" -- "$4"\n'
+        'echo "stat: illegal option -- c" >&2; exit 1\n'
+    )
+    (fake_bin / "stat").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}{os.pathsep}{os.environ['PATH']}")
+    payload = b"bsd host bytes"
+    fake_ssh, capture = configure_fake_ssh(monkeypatch, tmp_path, payload=payload, drops=1)
+
+    result = client["download_file"]("devbox", "/remote/mac.bin", False, str(fake_ssh))
+
+    assert result["state"] == "completed"
+    assert resume_offset(capture) == "5"
+    assert (downloads / "mac.bin").read_bytes() == payload
+
+
+def test_same_file_cannot_download_twice_at_once(monkeypatch: Any, tmp_path: Path, private_cache: Path) -> None:
+    client = load_client()
+    patch_downloads(client, monkeypatch, tmp_path / "Downloads")
+    fake_ssh, capture = configure_fake_ssh(monkeypatch, tmp_path, payload=b"bytes")
+    key = client["cache_key"]("devbox", "/remote/a.bin")[:32]
+    partial = private_cache / "tmux-opener" / "partial" / f"{key}.part"
+    partial.parent.mkdir(parents=True)
+    with partial.open("wb") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+        result = client["download_file"]("devbox", "/remote/a.bin", False, str(fake_ssh))
+
+    assert result["state"] == "failed"
+    assert "already being downloaded" in str(result["error"])
+    assert not capture.exists()
+
+
+def test_clean_partials_drops_only_stale_copies(private_cache: Path) -> None:
+    client = load_client()
+    directory = private_cache / "tmux-opener" / "partial"
+    directory.mkdir(parents=True)
+    for name in ("stale", "fresh"):
+        (directory / f"{name}.part").write_bytes(b"data")
+        (directory / f"{name}.id").write_text("4 0")
+    old = time.time() - client["PARTIAL_MAX_AGE"] - 60
+    os.utime(directory / "stale.part", (old, old))
+
+    client["clean_partials"]()
+
+    assert sorted(path.name for path in directory.iterdir()) == ["fresh.id", "fresh.part"]
