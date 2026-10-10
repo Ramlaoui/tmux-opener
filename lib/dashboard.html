@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>tmux-opener dashboard</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f3f5f7;
+      --panel: #fff;
+      --panel-muted: #eef1f4;
+      --text: #1d252c;
+      --muted: #63717c;
+      --border: #d8dee4;
+      --accent: #2468a2;
+      --accent-soft: #dcecf9;
+      --good: #23754b;
+      --good-soft: #dff3e8;
+      --warn: #946d19;
+      --warn-soft: #fff0c7;
+      --bad: #a33e3e;
+      --bad-soft: #fbe3e3;
+      --shadow: 0 2px 8px rgb(24 36 48 / 8%);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #171b1f;
+        --panel: #20262c;
+        --panel-muted: #2a3239;
+        --text: #edf2f5;
+        --muted: #a9b5be;
+        --border: #3a454e;
+        --accent: #79b9ef;
+        --accent-soft: #234965;
+        --good: #76ce9e;
+        --good-soft: #1d4432;
+        --warn: #e8c36a;
+        --warn-soft: #4a3c1b;
+        --bad: #f09292;
+        --bad-soft: #4c2628;
+        --shadow: 0 2px 10px rgb(0 0 0 / 20%);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 26px 0 42px; }
+    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
+    h1 { font-size: clamp(22px, 3vw, 32px); line-height: 1.1; letter-spacing: -.02em; margin: 0 0 5px; }
+    h2 { font-size: 16px; margin: 0; }
+    p { margin: 0; }
+    .subtitle { color: var(--muted); }
+    .health { display: flex; align-items: center; gap: 8px; color: var(--muted); text-align: right; white-space: nowrap; }
+    .health-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); }
+    .health-dot.stale { background: var(--warn); }
+    .health-dot.failed { background: var(--bad); }
+    .toolbar, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 11px; box-shadow: var(--shadow); }
+    .toolbar { display: flex; align-items: center; gap: 14px; padding: 11px 14px; margin-bottom: 17px; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 4px; }
+    button, input { font: inherit; }
+    button { border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
+    button:hover, button:focus-visible { border-color: var(--accent); color: var(--accent); }
+    button:disabled { cursor: wait; opacity: .58; }
+    button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    button.action { padding: 4px 8px; font-size: 12px; }
+    button.action.danger:hover { color: var(--bad); border-color: var(--bad); }
+    .filter { margin-left: auto; min-width: min(260px, 42vw); border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 7px; padding: 7px 9px; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 17px; }
+    .metric { padding: 14px; }
+    .metric-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .07em; }
+    .metric-value { display: block; font-size: 25px; font-weight: 680; margin-top: 3px; }
+    .clients { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 15px; }
+    .client { padding: 16px; min-width: 0; }
+    .client-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+    .client-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .client-title h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status { border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 650; }
+    .status.online { color: var(--good); background: var(--good-soft); }
+    .status.offline { color: var(--bad); background: var(--bad-soft); }
+    .machine { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 13px; margin-bottom: 14px; }
+    .machine div { min-width: 0; }
+    .machine dt { color: var(--muted); font-size: 11px; }
+    .machine dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; }
+    .machine .wide { grid-column: 1 / -1; }
+    .remote-hosts { border-top: 1px solid var(--border); padding-top: 11px; margin-bottom: 13px; }
+    .remote-hosts-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .remote-host { padding: 7px 0; border-top: 1px solid var(--border); }
+    .remote-host:first-of-type { border-top: 0; }
+    .remote-host-main { display: flex; justify-content: space-between; gap: 10px; }
+    .remote-host-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .remote-host-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .error { color: var(--bad); background: var(--bad-soft); border-radius: 7px; padding: 8px 10px; overflow-wrap: anywhere; margin-bottom: 12px; }
+    .history-warning { color: var(--warn); background: var(--warn-soft); border-radius: 7px; padding: 8px 10px; overflow-wrap: anywhere; margin-bottom: 12px; }
+    .transfers { border-top: 1px solid var(--border); padding-top: 11px; }
+    .transfers-head { display: flex; justify-content: space-between; align-items: center; color: var(--muted); margin-bottom: 8px; }
+    .transfer { border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; margin-top: 7px; }
+    .transfer-top, .transfer-bottom { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+    .transfer-name { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .transfer-state { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .transfer-destination, .transfer-error { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; margin-top: 3px; }
+    .transfer-error { color: var(--bad); }
+    .progress { height: 6px; border-radius: 99px; background: var(--panel-muted); overflow: hidden; margin: 8px 0 5px; }
+    .progress-bar { height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
+    .progress-bar.unknown { width: 38%; animation: move 1.2s infinite alternate ease-in-out; }
+    @keyframes move { from { transform: translateX(-10%); } to { transform: translateX(175%); } }
+    .transfer-actions { display: flex; gap: 6px; margin-top: 7px; }
+    .empty { color: var(--muted); padding: 14px 0 2px; }
+    .footnote { color: var(--muted); font-size: 12px; margin-top: 15px; }
+    @media (max-width: 700px) {
+      main { width: min(100% - 18px, 1180px); padding-top: 17px; }
+      header { display: block; }
+      .health { margin-top: 10px; text-align: left; }
+      .toolbar { display: block; }
+      .filter { width: 100%; margin-top: 10px; }
+      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .clients { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>tmux-opener</h1>
+        <p class="subtitle">Local opener clients and file transfers</p>
+      </div>
+      <p class="health"><span id="health-dot" class="health-dot"></span><span id="health-text">Connecting…</span></p>
+    </header>
+
+    <section class="toolbar" aria-label="Transfer filters">
+      <nav id="tabs" class="tabs" aria-label="Transfer state"></nav>
+      <input id="filter" class="filter" type="search" placeholder="Filter host, file, or status" autocomplete="off">
+    </section>
+
+    <section id="summary" class="summary" aria-label="Summary"></section>
+    <section id="clients" class="clients" aria-live="polite"></section>
+    <p id="footnote" class="footnote">Status refreshes every second.</p>
+  </main>
+
+  <script>
+    (() => {
+      "use strict";
+      const token = new URLSearchParams(location.hash.slice(1)).get("token");
+      const state = { snapshot: null, tab: "all", query: "", inFlight: false, lastGood: null, pendingActions: new Set() };
+      const tabs = [
+        ["all", "All"], ["running", "Running"], ["queued", "Queued"], ["completed", "Completed"], ["cancelled", "Cancelled"], ["error", "Error"]
+      ];
+      const byId = (id) => document.getElementById(id);
+      const make = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined) node.textContent = String(text);
+        return node;
+      };
+      const value = (item, key, fallback = "—") => {
+        const result = item && item[key];
+        return result === undefined || result === null || result === "" ? fallback : String(result);
+      };
+      const lower = (item) => String(item && item.state || "").toLowerCase();
+      const transferState = (download) => {
+        const raw = lower(download);
+        if (raw === "downloading") return "running";
+        if (["queued", "choosing_destination"].includes(raw)) return "queued";
+        if (raw === "completed") return "completed";
+        if (raw === "cancelled") return "cancelled";
+        if (["failed", "interrupted"].includes(raw)) return "error";
+        return raw || "queued";
+      };
+      const allDownloads = () => {
+        const clients = state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
+        return clients.flatMap((client) => {
+          const downloads = Array.isArray(client.downloads) ? client.downloads : [];
+          return downloads.map((download) => ({ client, download }));
+        });
+      };
+      const matches = ({ client, download }) => {
+        const kind = transferState(download);
+        if (state.tab !== "all" && kind !== state.tab) return false;
+        const query = state.query.trim().toLowerCase();
+        if (!query) return true;
+        return [client.host, download.id, download.ssh_host, download.path, download.destination, download.state, download.error]
+          .map((item) => String(item || "").toLowerCase()).some((item) => item.includes(query));
+      };
+      const setHealth = (kind, text) => {
+        const dot = byId("health-dot");
+        dot.className = `health-dot${kind ? ` ${kind}` : ""}`;
+        byId("health-text").textContent = text;
+      };
+      const renderTabs = () => {
+        const root = byId("tabs");
+        root.replaceChildren();
+        tabs.forEach(([id, label]) => {
+          const button = make("button", id === state.tab ? "active" : "", label);
+          button.type = "button";
+          button.addEventListener("click", () => { state.tab = id; render(); });
+          root.appendChild(button);
+        });
+      };
+      const renderSummary = () => {
+        const clients = state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
+        const transfers = allDownloads();
+        const metrics = [
+          ["Clients", clients.length],
+          ["Online", clients.filter((item) => item.online === true).length],
+          ["Active transfers", transfers.filter((item) => ["running", "queued"].includes(transferState(item.download))).length],
+          ["Errors", transfers.filter((item) => transferState(item.download) === "error" || item.client.online === false).length]
+        ];
+        const root = byId("summary");
+        root.replaceChildren();
+        metrics.forEach(([label, count]) => {
+          const card = make("div", "panel metric");
+          card.appendChild(make("span", "metric-label", label));
+          card.appendChild(make("span", "metric-value", count));
+          root.appendChild(card);
+        });
+      };
+      const formatBytes = (bytes) => {
+        const number = Number(bytes);
+        if (!Number.isFinite(number) || number < 0) return "—";
+        if (number < 1024) return `${number} B`;
+        const units = ["KiB", "MiB", "GiB", "TiB"];
+        let value = number;
+        let index = -1;
+        do { value /= 1024; index += 1; } while (value >= 1024 && index < units.length - 1);
+        return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`;
+      };
+      const renderTransfer = (client, download) => {
+        const stateName = transferState(download);
+        const actionKey = `${String(client.socket || "")}\u0000${String(download.id || "")}`;
+        const actionPending = state.pendingActions.has(actionKey);
+        const row = make("div", "transfer");
+        const top = make("div", "transfer-top");
+        const source = value(download, "path", value(download, "id", "Download"));
+        const name = make("span", "transfer-name", source.split("/").pop() || source);
+        name.title = source;
+        top.appendChild(name);
+        top.appendChild(make("span", "transfer-state", value(download, "state", stateName)));
+        row.appendChild(top);
+        row.appendChild(make("div", "transfer-destination", `Source: ${source}`));
+        if (download.destination) row.appendChild(make("div", "transfer-destination", `→ ${download.destination}`));
+        const receivedValue = Number(download.bytes_received);
+        const received = Number.isFinite(receivedValue) && receivedValue >= 0 ? receivedValue : 0;
+        const size = Number(download.size_bytes);
+        const knownSize = Number.isFinite(size) && size > 0;
+        const progress = make("div", "progress");
+        const bar = make("div", `progress-bar${knownSize ? "" : " unknown"}`);
+        if (knownSize) bar.style.width = `${Math.min(100, Math.max(0, received / size * 100))}%`;
+        progress.appendChild(bar);
+        row.appendChild(progress);
+        const bottom = make("div", "transfer-bottom");
+        bottom.appendChild(make("span", "transfer-state", knownSize ? `${formatBytes(received)} / ${formatBytes(size)}` : formatBytes(received)));
+        const actions = make("span", "transfer-actions");
+        if (stateName === "running" || stateName === "queued") {
+          const cancel = make("button", "action danger", actionPending ? "Working…" : "Cancel");
+          cancel.type = "button";
+          cancel.disabled = actionPending;
+          cancel.addEventListener("click", () => action(client, "cancel_download", download));
+          actions.appendChild(cancel);
+        } else if (stateName === "error" || stateName === "cancelled") {
+          const retry = make("button", "action", actionPending ? "Working…" : "Retry");
+          retry.type = "button";
+          retry.disabled = actionPending;
+          retry.addEventListener("click", () => action(client, "retry_download", download));
+          actions.appendChild(retry);
+        }
+        bottom.appendChild(actions);
+        row.appendChild(bottom);
+        if (download.error) row.appendChild(make("div", "transfer-error", download.error));
+        return row;
+      };
+      const renderClient = (client, filteredTransfers) => {
+        const card = make("article", "panel client");
+        const head = make("div", "client-head");
+        const title = make("div", "client-title");
+        title.appendChild(make("span", `status ${client.online ? "online" : "offline"}`, client.online ? "Online" : "Offline"));
+        title.appendChild(make("h2", "", value(client, "host", "Client")));
+        head.appendChild(title);
+        card.appendChild(head);
+        const info = client.client_info && typeof client.client_info === "object" ? client.client_info : {};
+        const machine = make("dl", "machine");
+        [["Machine", info.hostname], ["User", info.user], ["OS", info.os], ["PID", info.pid], ["Default SSH", info.default_ssh_host], ["Instance", info.instance_id], ["Socket", client.socket]]
+          .forEach(([label, item], index) => {
+            const wrap = make("div", index === 6 ? "wide" : "");
+            wrap.appendChild(make("dt", "", label));
+            wrap.appendChild(make("dd", "", item));
+            machine.appendChild(wrap);
+          });
+        card.appendChild(machine);
+        const hosts = Array.isArray(client.hosts) ? client.hosts : [];
+        if (hosts.length) {
+          const remoteHosts = make("div", "remote-hosts");
+          remoteHosts.appendChild(make("div", "remote-hosts-title", "Recent remote hosts"));
+          hosts.forEach((host) => {
+            const row = make("div", "remote-host");
+            const main = make("div", "remote-host-main");
+            main.appendChild(make("strong", "", value(host, "ssh_host", "Remote host")));
+            main.appendChild(make("span", "transfer-state", value(host, "last_seen")));
+            row.appendChild(main);
+            row.appendChild(make("div", "remote-host-meta", `${value(host, "user")}@${value(host, "hostname")} · ${value(host, "os")} · ${value(host, "cwd")}`));
+            remoteHosts.appendChild(row);
+          });
+          card.appendChild(remoteHosts);
+        }
+        if (client.error) card.appendChild(make("div", "error", client.error));
+        if (client.history_error) card.appendChild(make("div", "history-warning", `Transfer history: ${client.history_error}`));
+        const transfers = make("div", "transfers");
+        const transferHead = make("div", "transfers-head");
+        transferHead.appendChild(make("strong", "", "Transfers"));
+        transferHead.appendChild(make("span", "", `${filteredTransfers.length} shown`));
+        transfers.appendChild(transferHead);
+        if (!filteredTransfers.length) transfers.appendChild(make("p", "empty", "No transfers match this view."));
+        filteredTransfers.forEach((download) => transfers.appendChild(renderTransfer(client, download)));
+        card.appendChild(transfers);
+        return card;
+      };
+      const render = () => {
+        renderTabs();
+        renderSummary();
+        const root = byId("clients");
+        root.replaceChildren();
+        const clients = state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
+        clients.forEach((client) => {
+          const transfers = (Array.isArray(client.downloads) ? client.downloads : []).filter((download) => matches({ client, download }));
+          const query = state.query.trim();
+          if (query && !transfers.length && !String(client.host || "").toLowerCase().includes(query.toLowerCase())) return;
+          root.appendChild(renderClient(client, transfers));
+        });
+        if (!clients.length) root.appendChild(make("p", "empty", "No configured clients found."));
+      };
+      const action = async (client, actionName, download) => {
+        if (!token) { setHealth("failed", "Missing dashboard token"); return; }
+        const actionKey = `${String(client.socket || "")}\u0000${String(download.id || "")}`;
+        if (state.pendingActions.has(actionKey)) return;
+        state.pendingActions.add(actionKey);
+        render();
+        try {
+          const response = await fetch("/api/action", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ socket: client.socket, action: actionName, download_id: download.id })
+          });
+          let result = null;
+          try { result = await response.json(); } catch (_error) { result = null; }
+          if (!response.ok || !result || result.ok !== true) {
+            const detail = result && typeof result.error === "string" ? result.error : `Action failed (${response.status})`;
+            throw new Error(detail);
+          }
+          await refresh();
+        } catch (error) {
+          setHealth("failed", error instanceof Error ? error.message : "Action failed");
+        } finally {
+          state.pendingActions.delete(actionKey);
+          render();
+        }
+      };
+      const refresh = async () => {
+        if (state.inFlight || !token) return;
+        state.inFlight = true;
+        try {
+          const response = await fetch("/api/status", { headers: { "Authorization": `Bearer ${token}` }, cache: "no-store" });
+          if (!response.ok) throw new Error(`Status failed (${response.status})`);
+          const snapshot = await response.json();
+          if (!snapshot || !Array.isArray(snapshot.clients)) throw new Error("Invalid status response");
+          state.snapshot = snapshot;
+          state.lastGood = Date.now();
+          render();
+          setHealth("", `Updated ${new Date().toLocaleTimeString()}`);
+          byId("footnote").textContent = "Status refreshes every second.";
+        } catch (error) {
+          const age = state.lastGood ? ` · last good ${Math.round((Date.now() - state.lastGood) / 1000)}s ago` : "";
+          setHealth("failed", `${error instanceof Error ? error.message : "Refresh failed"}${age}`);
+          byId("footnote").textContent = "Live status unavailable; showing the last successful snapshot.";
+        } finally {
+          state.inFlight = false;
+        }
+      };
+      byId("filter").addEventListener("input", (event) => { state.query = event.target.value; render(); });
+      render();
+      refresh();
+      window.setInterval(refresh, 1000);
+    })();
+  </script>
+</body>
+</html>

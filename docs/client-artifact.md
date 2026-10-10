@@ -84,6 +84,44 @@ TMUX_OPENER_PDF_VIEWER=system tmux-opener install-service HOST
 
 The service stores the viewer argument, so the choice survives service restarts.
 
+## Download queue and desktop dashboard
+
+```sh
+tmux-opener dashboard
+tmux-opener dashboard HOST
+tmux-opener terminal-dashboard
+tmux-opener downloads HOST
+tmux-opener downloads --json
+```
+
+The dashboard opens a local browser page showing configured clients, reported
+remote host information, and download progress/history. It includes cancel and
+retry controls. It binds only to loopback and requires the session token in the
+printed URL for API requests. `--no-browser` prints the URL; Ctrl-C stops the
+server. The page does not need an external service or web assets.
+
+For the same **prefix + `O`** shortcut in desktop tmux, add this to the local
+`.tmux.conf` (or run it directly with `tmux run-shell`):
+
+```tmux
+run-shell ~/.local/share/tmux-opener-client/integration/client.tmux
+```
+
+It opens the local terminal dashboard, including all desktop clients and their
+downloads. The shortcut honors `@tmux_opener_dashboard_key`, and optional
+`@tmux_opener_socket`/`@tmux_opener_ssh_host` select a specific local client.
+
+The client runs up to two downloads concurrently and keeps the latest 100
+records in a mode-0600 `HOST.downloads.json` beside its socket. Queued and active
+records become interrupted after an unexpected restart. A retry creates a new
+ID, and cancelled or failed transfers never publish an incomplete destination.
+Both the client and the remote plugin must be updated; the host's prefix + `O`
+popup reads the same queue through its forwarded socket.
+
+Online clients are responding local processes. Remote host timestamps reflect
+plugin reports; they do not imply an active SSH session. Requested status views
+include download paths and destinations; normal logs remain redacted.
+
 ## Safe client ownership
 
 Each client holds a lifetime lock beside its socket; wrapper lifecycle operations

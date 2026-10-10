@@ -156,7 +156,63 @@ On macOS, `D` uses the native save dialog. On Linux it uses `zenity` or `kdialog
 with Python Tk as a fallback. Windows uses Python Tk. Downloads require the
 client bridge; they do not use the same-host opener fallback.
 
-After updating both installations, restart the client with
+### Download queue and dashboards
+
+Press **prefix + `O`** (capital O) on the host to open the live tmux dashboard.
+It shows the desktop client's machine, user, OS and process, the current remote
+host/pane information, and recent downloads. Use the arrow keys or `j`/`k` to
+select a download, `c` to cancel it, `r` to retry a failed, cancelled or interrupted
+transfer, and `q` to close the popup. Configure the shortcut with:
+
+```tmux
+set -g @tmux_opener_dashboard_key 'O'
+```
+
+On the desktop, open the browser dashboard or pull a snapshot:
+
+```sh
+tmux-opener dashboard          # all configured desktop clients
+tmux-opener dashboard HOST     # one host's client
+tmux-opener terminal-dashboard # local clients in a terminal
+tmux-opener downloads HOST
+tmux-opener downloads --json
+```
+
+The browser dashboard runs on a temporary loopback port and supports the same
+cancel/retry actions. It polls local client sockets, including custom sockets in
+managed SSH snippets, and displays configured offline clients. `--no-browser`
+prints its local URL instead of opening a browser. Keep the command running
+while using the page; Ctrl-C closes the dashboard server.
+
+The desktop can use the same **prefix + `O`** shortcut. Add this to the local
+desktop's `.tmux.conf` after installing the client archive:
+
+```tmux
+run-shell ~/.local/share/tmux-opener-client/integration/client.tmux
+```
+
+For a source checkout, use its `integration/client.tmux` path instead. Reload
+the file with `tmux run-shell PATH/TO/integration/client.tmux` to apply it to an
+existing tmux server. This opens the local terminal dashboard, which aggregates
+the desktop clients. The regular tmux plugin also falls back to this local view
+when there is no forwarded bridge and the desktop `tmux-opener` CLI is on PATH.
+
+Transfers have stable IDs and move through queued, choosing a save destination,
+downloading, completed, failed or cancelled states. Two transfers can run at once.
+The client stores the latest 100 records in a private `HOST.downloads.json` file
+beside its socket. After a restart, unfinished records are marked interrupted;
+retrying creates a new transfer without changing the old record. Progress shows
+received bytes and percentages when the plugin supplied a file size. The source
+file can change during a transfer, so completion is confirmed by the final state.
+
+Client **online/offline** means the local client responded to a status request.
+Remote host information is reported by the plugin when downloading or viewing
+the host dashboard; its timestamp shows recent activity, not an active SSH
+connection count. The tmux view covers its forwarded client; the desktop view
+aggregates clients on that desktop. Download paths appear in these requested
+status views while ordinary logs stay redacted.
+
+Both sides must be updated for queue status. After updating both installations, restart the client with
 `tmux-opener restart-client HOST` and reload the tmux plugin:
 
 ```sh

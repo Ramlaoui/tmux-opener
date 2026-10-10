@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import platform
@@ -214,6 +215,15 @@ def main() -> int:
         if not requests:
             tmux_message("select existing file paths to download (one per line or space-separated)")
             return 1
+        for request in requests:
+            try:
+                request["size_bytes"] = os.stat(str(request["path"])).st_size
+            except OSError:
+                tmux_message("a selected file disappeared or is no longer readable")
+                return 1
+            request["host_info"] = {"hostname": platform.node(), "user": getpass.getuser(),
+                                    "os": platform.system(), "cwd": args.cwd,
+                                    "pane": os.environ.get("TMUX_PANE", "")}
         if args.print_request:
             print(json.dumps(requests, indent=2, sort_keys=True))
             return 0

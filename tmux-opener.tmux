@@ -11,6 +11,7 @@ key="$(tmux show-option -gqv '@tmux_opener_key')"
 download_key="$(tmux show-option -gqv '@tmux_opener_download_key')"
 save_as_key="$(tmux show-option -gqv '@tmux_opener_save_as_key')"
 picker_key="$(tmux show-option -gqv '@tmux_opener_picker_key')"
+dashboard_key="$(tmux show-option -gqv '@tmux_opener_dashboard_key')"
 socket_path="$(tmux show-option -gqv '@tmux_opener_socket')"
 ssh_host="$(tmux show-option -gqv '@tmux_opener_ssh_host')"
 fallback="$(tmux show-option -gqv '@tmux_opener_fallback')"
@@ -26,6 +27,9 @@ if [ -z "$key" ]; then
 fi
 if [ -z "$picker_key" ]; then
   picker_key="o"
+fi
+if [ -z "$dashboard_key" ]; then
+  dashboard_key="O"
 fi
 download_key="${download_key:-d}"
 save_as_key="${save_as_key:-D}"
@@ -90,3 +94,13 @@ fi
 
 popup_cmd="$picker_cmd; status=\$?; if [ \$status -eq 0 ] || [ \$status -eq 130 ]; then tmux display-popup -C; else printf '\n tmux-opener exited with status %s. Press Enter to close. ' \"\$status\"; read _; tmux display-popup -C; fi"
 tmux bind-key "$picker_key" display-popup -d "#{pane_current_path}" -w 90% -h 70% "$popup_cmd"
+
+dashboard_cmd="TMUX_OPENER_CWD=#{q:pane_current_path} TMUX_PANE=#{q:pane_id}"
+if [ -n "$socket_path" ]; then
+  dashboard_cmd="$dashboard_cmd TMUX_OPENER_SOCKET=$(shell_quote "$socket_path")"
+fi
+if [ -n "$ssh_host" ]; then
+  dashboard_cmd="$dashboard_cmd TMUX_OPENER_SSH_HOST=$(shell_quote "$ssh_host")"
+fi
+dashboard_cmd="$dashboard_cmd $(shell_quote "$CURRENT_DIR/scripts/tmux-opener-status")"
+tmux bind-key "$dashboard_key" display-popup -E -d "#{pane_current_path}" -w 90% -h 70% "$dashboard_cmd"

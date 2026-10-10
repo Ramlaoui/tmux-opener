@@ -118,7 +118,10 @@ def test_python_entrypoints_compile() -> None:
         "scripts/tmux-opener-dispatch",
         "scripts/tmux-opener-pick",
         "scripts/tmux-opener-send",
+        "scripts/tmux-opener-status",
         "scripts/tmux_opener_common.py",
+        "lib/tmux_opener_downloads.py",
+        "lib/tmux_opener_dashboard.py",
     ]:
         compile_script(relative_path)
 
@@ -156,7 +159,9 @@ def test_tmux_plugin_key_bindings() -> None:
             assert "copy-pipe-and-cancel" in save_as
         assert "tmux-opener-pick" in prefix_keys
         assert "display-popup" in prefix_keys
-        assert "display-popup -E" not in prefix_keys
+        picker_binding = next(line for line in prefix_keys.splitlines() if "tmux-opener-pick" in line)
+        assert "display-popup -E" not in picker_binding
+        assert "tmux-opener-status" in prefix_keys
         assert "--target-pane #{pane_id}" not in prefix_keys
         assert "-d \"#{pane_current_path}\"" in prefix_keys
     finally:
@@ -179,10 +184,36 @@ def test_server_archive_contents(tmp_path: Path) -> None:
         "tmux-opener/scripts/tmux-opener-dispatch",
         "tmux-opener/scripts/tmux-opener-pick",
         "tmux-opener/scripts/tmux-opener-send",
+        "tmux-opener/scripts/tmux-opener-status",
         "tmux-opener/scripts/tmux_opener_common.py",
         "tmux-opener/integration",
         "tmux-opener/integration/vimtex.lua",
     }
+
+
+def test_extracted_client_tmux_shortcut_uses_local_dashboard(tmp_path: Path) -> None:
+    tmux = shutil.which("tmux")
+    if tmux is None:
+        pytest.skip("tmux is not installed")
+    archive = package_archive("package-client", "vlocal-tmux", "tmux-opener-client-vlocal-tmux.tar.gz", tmp_path / "dist")
+    root = extract_archive(archive, tmp_path / "extract")
+    server_name = f"tmux-opener-local-pytest-{os.getpid()}"
+    run_command([tmux, "-L", server_name, "-f", "/dev/null", "new-session", "-d", "-s", "ci"])
+    try:
+        run_command([tmux, "-L", server_name, "run-shell", root / "integration/client.tmux"])
+        binding = run_command([tmux, "-L", server_name, "list-keys", "-T", "prefix", "O"]).stdout
+        assert "terminal-dashboard" in binding
+        assert str(root / "bin/tmux-opener") in binding
+        assert "display-popup -E" in binding
+        run_command([tmux, "-L", server_name, "set-option", "-g", "@tmux_opener_dashboard_key", "P"])
+        run_command([tmux, "-L", server_name, "set-option", "-g", "@tmux_opener_socket", str(tmp_path / "custom.sock")])
+        run_command([tmux, "-L", server_name, "set-option", "-g", "@tmux_opener_ssh_host", "devbox"])
+        run_command([tmux, "-L", server_name, "run-shell", root / "integration/client.tmux"])
+        configured = run_command([tmux, "-L", server_name, "list-keys", "-T", "prefix", "P"]).stdout
+        assert "--socket" in configured and "custom.sock" in configured
+        assert "devbox" in configured
+    finally:
+        subprocess.run([tmux, "-L", server_name, "kill-server"], check=False)
 
 
 def test_client_archive_contents(tmp_path: Path) -> None:
@@ -199,6 +230,15 @@ def test_client_archive_contents(tmp_path: Path) -> None:
         "tmux-opener-client/bin",
         "tmux-opener-client/bin/tmux-opener",
         "tmux-opener-client/bin/tmux-opener-client",
+        "tmux-opener-client/lib",
+        "tmux-opener-client/lib/tmux_opener_downloads.py",
+        "tmux-opener-client/lib/tmux_opener_dashboard.py",
+        "tmux-opener-client/lib/dashboard.html",
+        "tmux-opener-client/scripts",
+        "tmux-opener-client/scripts/tmux-opener-status",
+        "tmux-opener-client/scripts/tmux_opener_common.py",
+        "tmux-opener-client/integration",
+        "tmux-opener-client/integration/client.tmux",
     }
 
 

@@ -219,8 +219,10 @@ def test_download_file_ssh_failure_leaves_no_final_or_part_file(
     patch_downloads(client, monkeypatch, downloads)
     fake_ssh, _capture = configure_fake_ssh(monkeypatch, tmp_path, fail=True)
 
-    client["download_file"]("devbox", "/remote/failure.bin", False, str(fake_ssh))
+    result = client["download_file"]("devbox", "/remote/failure.bin", False, str(fake_ssh))
 
+    assert result["state"] == "failed"
+    assert result["bytes_received"] == 0
     assert list(downloads.iterdir()) == []
 
 
@@ -339,8 +341,21 @@ def test_download_dispatch_is_async_while_ping_remains_responsive(
     )
 
     socket_path = tmp_path / "opener.sock"
+    download_queue = client["DownloadQueue"](
+        tmp_path / "download-history.json",
+        lambda job, update, cancel: client["download_file"](
+            job["ssh_host"],
+            job["path"],
+            job["ask_destination"],
+            str(fake_ssh),
+            None,
+            False,
+            progress=update,
+            cancel=cancel,
+        ),
+    )
     server = client["bind_server"](str(socket_path))
-    args = client_args()
+    args = client_args(download_queue=download_queue)
     stop = threading.Event()
 
     def run_server() -> None:
@@ -359,18 +374,48 @@ def test_download_dispatch_is_async_while_ping_remains_responsive(
     }
 
     try:
-        assert send_socket_request(socket_path, request) == {"ok": True}
-        assert send_socket_request(socket_path, {"version": 1, "action": "ping"})["ok"] is True
+        acknowledgement = send_socket_request(socket_path, request)
+        assert acknowledgement["ok"] is True
+        download_id = acknowledgement["download_id"]
+        assert isinstance(download_id, str)
+        assert len(download_id) == 32
+        assert acknowledgement["state"] == "queued"
+
+        status_request = {
+            "version": 1,
+            "action": "get_status",
+            "ssh_host": "devbox",
+        }
+        deadline = time.monotonic() + 2
+        job = None
+        while time.monotonic() < deadline:
+            assert send_socket_request(socket_path, {"version": 1, "action": "ping"})["ok"] is True
+            status = send_socket_request(socket_path, status_request)
+            job = next((row for row in status["downloads"] if row["id"] == download_id), None)
+            if job is not None and job["state"] == "downloading":
+                break
+            time.sleep(0.01)
+        assert job is not None
+        assert job["state"] == "downloading"
+        assert job["bytes_received"] == 0
         assert not (downloads / "async.bin").exists()
 
         gate.touch()
         destination = downloads / "async.bin"
         deadline = time.monotonic() + 3
-        while time.monotonic() < deadline and not destination.exists():
+        while time.monotonic() < deadline:
+            status = send_socket_request(socket_path, status_request)
+            job = next(row for row in status["downloads"] if row["id"] == download_id)
+            if job["state"] == "completed":
+                break
             time.sleep(0.01)
+        assert job["state"] == "completed"
+        assert job["bytes_received"] == len(payload)
+        assert job["destination"] == str(destination)
         assert destination.read_bytes() == payload
     finally:
+        gate.touch()
         stop.set()
-
-    server_thread.join(timeout=2)
+        server_thread.join(timeout=2)
+        download_queue.close()
     assert not server_thread.is_alive()
