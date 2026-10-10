@@ -216,6 +216,8 @@ def test_restart_api_authenticates_owner_and_scopes_bulk_actions(tmp_path: Path)
     try:
         payload = {"action": "restart", "socket": str(path), "instance_id": "current"}
         assert post(payload, {})[0] == 401
+        assert post({"action": []})[0] == 400
+        assert post({**payload, "pid": 123})[0] == 400
         assert post(payload, {**headers, "Origin": "https://untrusted.invalid"})[0] == 403
         assert post({**payload, "socket": str(tmp_path / "outside.sock")})[0] == 403
         assert post({**payload, "instance_id": "old"})[0] == 409

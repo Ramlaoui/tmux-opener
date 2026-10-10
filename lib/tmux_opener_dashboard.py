@@ -449,7 +449,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             return
         if route.path == "/api/clients":
             action = payload.get("action")
-            if (action == "restart" and set(payload) != {"action", "socket", "instance_id"}) or (
+            if not isinstance(action, str) or (action == "restart" and set(payload) != {"action", "socket", "instance_id"}) or (
                 action == "restart_all" and set(payload) != {"action"}
             ) or action not in {"restart", "restart_all"}:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "unsupported client action fields")
