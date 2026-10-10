@@ -344,3 +344,28 @@ def test_action_requires_local_origin_and_rejects_arbitrary_socket(tmp_path: Pat
     finally:
         responder.close()
         _stop_server(server, thread)
+
+
+def test_settings_api_reads_validates_and_saves(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    server, thread = _start_server(tmp_path, token="settings-token")
+    port = server.server_address[1]
+    headers = {"Host": f"127.0.0.1:{port}", "Authorization": "Bearer settings-token",
+               "Origin": f"http://127.0.0.1:{port}", "Content-Type": "application/json"}
+
+    def post(settings: object, **extra: str):
+        body = json.dumps({"settings": settings}).encode()
+        return _http(server, "POST", "/api/settings", {**headers, **extra, "Content-Length": str(len(body))}, body)
+
+    try:
+        current = json.loads(_http(server, "GET", "/api/settings", headers)[2])
+        assert current["settings"]["rules"] == [] and ".pdf" in current["preview_suffixes"]
+        assert post({"rules": []}, Origin="http://evil.example")[0] == 403
+        assert post({"rules": [{"pattern": "*.pdf", "opener": "open -a Terminal"}]})[0] == 400
+        status, _headers, body = post({"rules": [{"pattern": "*.pdf", "opener": "preview"}]})
+        assert status == 200
+        assert json.loads(body)["settings"]["rules"] == [{"pattern": "*.pdf", "opener": "preview"}]
+        saved = json.loads((tmp_path / "config" / "tmux-opener" / "settings.json").read_text())
+        assert saved["rules"] == [{"pattern": "*.pdf", "opener": "preview"}]
+    finally:
+        _stop_server(server, thread)

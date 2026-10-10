@@ -169,11 +169,11 @@ def test_rendering_sanitizes_terminal_controls_and_shows_recent_host_label() -> 
     assert "\\x1b" not in rendered
     assert "\x1b" not in rendered
     assert "does not indicate active SSH" in rendered
-    assert "512 B/1.0 KiB (50%)" in rendered
+    assert "512 B of 1.0 KiB (50%)" in rendered
     assert "compute-01" in rendered
     assert "result[31m.csv" in rendered
-    assert "source: /scratch/result[31m.csv" in rendered
-    assert "ID       HOST       STATE   PROGRESS FILE" in rendered
+    assert "source  cluster:/scratch/result[31m.csv" in rendered
+    assert "TRANSFERS  1 active" in rendered
 
 
 def test_action_requests_use_the_same_socket_and_download_id() -> None:
@@ -230,7 +230,7 @@ def test_local_status_aggregates_clients_and_routes_download_actions(monkeypatch
     assert snapshot["hosts"][0]["hostname"] == "compute"
     assert snapshot["downloads"][0]["_socket"] == str(tmp_path / "cluster.sock")
     assert snapshot["remote_localhost_forwards"] == [{"host": "cluster", "port": 8080}]
-    assert "tmux-opener desktop dashboard" in "\n".join(dashboard.render_snapshot_lines(snapshot, ssh_host="cluster", pane="%7"))
+    assert "desktop dashboard" in "\n".join(dashboard.render_snapshot_lines(snapshot, ssh_host="cluster", pane="%7"))
 
     dashboard.request_local_action(snapshot["downloads"][0], "cancel_download", 0.75)
     assert requests == [
@@ -266,7 +266,7 @@ class FakeScreen:
         self.height = height
         self.width = width
         self.keys = list(keys)
-        self.current: dict[int, str] = {}
+        self.current: dict[int, list[str]] = {}
         self.frames: list[list[str]] = []
 
     def timeout(self, _milliseconds: int) -> None:
@@ -278,11 +278,13 @@ class FakeScreen:
     def erase(self) -> None:
         self.current = {}
 
-    def addnstr(self, row: int, _column: int, text: str, _length: int) -> None:
-        self.current[row] = text
+    def addnstr(self, row: int, column: int, text: str, length: int, _attr: int = 0) -> None:
+        cells = self.current.setdefault(row, [])
+        cells.extend(" " * (column - len(cells)))
+        cells[column : column + length] = text[:length]
 
     def refresh(self) -> None:
-        self.frames.append([self.current[row] for row in sorted(self.current)])
+        self.frames.append(["".join(self.current[row]) for row in sorted(self.current)])
 
     def getch(self) -> int:
         return self.keys.pop(0) if self.keys else ord("q")
@@ -314,8 +316,9 @@ def test_fake_curses_navigation_scrolls_selected_row_and_quits(monkeypatch: pyte
     )
 
     assert screen.frames
-    assert any(line.startswith("> ") and "downloa" in line for line in screen.frames[-1])
-    assert not any("download-1" in line for line in screen.frames[-1])
+    selected = [line for line in screen.frames[-1] if line.startswith(f" {dashboard.GLYPHS['select']}")]
+    assert len(selected) == 1 and "result-8.csv" in selected[0]
+    assert not any("result-1.csv" in line for line in screen.frames[-1])
 
 
 def test_fake_curses_bridge_error_recovers_and_q_quits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -341,7 +344,7 @@ def test_fake_curses_bridge_error_recovers_and_q_quits(monkeypatch: pytest.Monke
     )
 
     assert any(any("ERROR: socket unavailable" in line for line in frame) for frame in screen.frames)
-    assert any(any("tmux-opener host dashboard" in line for line in frame) for frame in screen.frames[1:])
+    assert any(any("TRANSFERS" in line for line in frame) for frame in screen.frames[1:])
 
 
 def test_tmux_dashboard_binding_is_installed_by_a_real_tmux_server() -> None:
@@ -371,3 +374,29 @@ def test_tmux_dashboard_binding_is_installed_by_a_real_tmux_server() -> None:
         assert "TMUX_PANE=#{q:pane_id}" in prefix_keys
     finally:
         subprocess.run([tmux, "-L", server_name, "kill-server"], check=False)
+
+
+def test_fake_curses_openers_view_cycles_and_saves_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    stored = {"settings": {"rules": [{"pattern": "*.pdf", "opener": "preview"}, {"pattern": "*.pt", "opener": "download"}],
+                           "vscode_folder_window": "new", "vscode_file_window": "new", "pdf_viewer": "auto"},
+              "path": "/home/alice/.config/tmux-opener/settings.json", "preview_suffixes": [".pdf"]}
+    saved: list[dict[str, object]] = []
+
+    def save(settings, *_args) -> None:
+        saved.append(settings)
+        stored["settings"] = settings
+
+    monkeypatch.setattr(dashboard, "request_status", lambda *args, **kwargs: status_response())
+    monkeypatch.setattr(dashboard, "request_settings", lambda *args: json.loads(json.dumps(stored)))
+    monkeypatch.setattr(dashboard, "save_settings", save)
+    keys = [9, curses.KEY_RIGHT, ord("J"), curses.KEY_UP, ord("x"), ord("q")]
+    screen = FakeScreen(height=24, width=100, keys=keys)
+
+    dashboard.run_live_dashboard(screen, socket_path="/tmp/status.sock", cwd="/tmp/work", pane="%9",
+                                 ssh_host="cluster", timeout=0.75)
+
+    assert [rule["opener"] for rule in saved[0]["rules"]] == ["download", "download"]
+    assert [rule["pattern"] for rule in saved[1]["rules"]] == ["*.pt", "*.pdf"]
+    assert saved[2]["rules"] == [{"pattern": "*.pdf", "opener": "download"}]
+    assert any("*.pdf" in line and "Download" in line for line in screen.frames[-1])
+    assert any("saved" in line for line in screen.frames[-1])

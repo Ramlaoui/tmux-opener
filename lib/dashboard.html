@@ -3,384 +3,729 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>tmux-opener dashboard</title>
+  <title>tmux-opener</title>
+  <!-- Served offline from loopback with a bearer token: no external CSS/JS. -->
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f3f5f7;
-      --panel: #fff;
-      --panel-muted: #eef1f4;
-      --text: #1d252c;
-      --muted: #63717c;
-      --border: #d8dee4;
-      --accent: #2468a2;
-      --accent-soft: #dcecf9;
-      --good: #23754b;
-      --good-soft: #dff3e8;
-      --warn: #946d19;
-      --warn-soft: #fff0c7;
-      --bad: #a33e3e;
-      --bad-soft: #fbe3e3;
-      --shadow: 0 2px 8px rgb(24 36 48 / 8%);
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --sunken: #f1f3f6;
+      --line: #e3e6eb;
+      --line-strong: #cfd4dc;
+      --text: #111827;
+      --muted: #6b7280;
+      --faint: #9ca3af;
+      --accent: #4f46e5;
+      --accent-soft: #eef0ff;
+      --accent-text: #4338ca;
+      --good: #059669;
+      --good-soft: #e7f7f0;
+      --warn: #b45309;
+      --warn-soft: #fdf4e3;
+      --bad: #dc2626;
+      --bad-soft: #fdecec;
+      --info: #2563eb;
+      --info-soft: #e8f0fe;
+      --shadow: 0 1px 2px rgb(16 24 40 / 5%), 0 1px 3px rgb(16 24 40 / 6%);
+      --radius: 12px;
+      --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #171b1f;
-        --panel: #20262c;
-        --panel-muted: #2a3239;
-        --text: #edf2f5;
-        --muted: #a9b5be;
-        --border: #3a454e;
-        --accent: #79b9ef;
-        --accent-soft: #234965;
-        --good: #76ce9e;
-        --good-soft: #1d4432;
-        --warn: #e8c36a;
-        --warn-soft: #4a3c1b;
-        --bad: #f09292;
-        --bad-soft: #4c2628;
-        --shadow: 0 2px 10px rgb(0 0 0 / 20%);
+        --bg: #0d0f13;
+        --panel: #15181e;
+        --sunken: #1b1f27;
+        --line: #252a33;
+        --line-strong: #333a45;
+        --text: #e8eaee;
+        --muted: #9199a6;
+        --faint: #636b78;
+        --accent: #8b87ff;
+        --accent-soft: #23224a;
+        --accent-text: #b4b1ff;
+        --good: #34d399;
+        --good-soft: #10291f;
+        --warn: #fbbf24;
+        --warn-soft: #2d2410;
+        --bad: #f87171;
+        --bad-soft: #2f1517;
+        --info: #60a5fa;
+        --info-soft: #132238;
+        --shadow: 0 1px 2px rgb(0 0 0 / 40%);
       }
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    main { width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 26px 0 42px; }
-    header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
-    h1 { font-size: clamp(22px, 3vw, 32px); line-height: 1.1; letter-spacing: -.02em; margin: 0 0 5px; }
-    h2 { font-size: 16px; margin: 0; }
-    p { margin: 0; }
-    .subtitle { color: var(--muted); }
-    .health { display: flex; align-items: center; gap: 8px; color: var(--muted); text-align: right; white-space: nowrap; }
-    .health-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--good); }
-    .health-dot.stale { background: var(--warn); }
-    .health-dot.failed { background: var(--bad); }
-    .toolbar, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 11px; box-shadow: var(--shadow); }
-    .toolbar { display: flex; align-items: center; gap: 14px; padding: 11px 14px; margin-bottom: 17px; }
-    .tabs { display: flex; flex-wrap: wrap; gap: 4px; }
-    button, input { font: inherit; }
-    button { border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 7px; padding: 6px 10px; cursor: pointer; }
-    button:hover, button:focus-visible { border-color: var(--accent); color: var(--accent); }
-    button:disabled { cursor: wait; opacity: .58; }
-    button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
-    button.action { padding: 4px 8px; font-size: 12px; }
-    button.action.danger:hover { color: var(--bad); border-color: var(--bad); }
-    .filter { margin-left: auto; min-width: min(260px, 42vw); border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 7px; padding: 7px 9px; }
-    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 17px; }
-    .metric { padding: 14px; }
-    .metric-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .07em; }
-    .metric-value { display: block; font-size: 25px; font-weight: 680; margin-top: 3px; }
-    .clients { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 15px; }
-    .client { padding: 16px; min-width: 0; }
-    .client-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
-    .client-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-    .client-title h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .status { border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 650; }
-    .status.online { color: var(--good); background: var(--good-soft); }
-    .status.offline { color: var(--bad); background: var(--bad-soft); }
-    .machine { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 13px; margin-bottom: 14px; }
-    .machine div { min-width: 0; }
-    .machine dt { color: var(--muted); font-size: 11px; }
-    .machine dd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; }
-    .machine .wide { grid-column: 1 / -1; }
-    .remote-hosts { border-top: 1px solid var(--border); padding-top: 11px; margin-bottom: 13px; }
-    .remote-hosts-title { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .remote-host { padding: 7px 0; border-top: 1px solid var(--border); }
-    .remote-host:first-of-type { border-top: 0; }
-    .remote-host-main { display: flex; justify-content: space-between; gap: 10px; }
-    .remote-host-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .remote-host-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-    .error { color: var(--bad); background: var(--bad-soft); border-radius: 7px; padding: 8px 10px; overflow-wrap: anywhere; margin-bottom: 12px; }
-    .history-warning { color: var(--warn); background: var(--warn-soft); border-radius: 7px; padding: 8px 10px; overflow-wrap: anywhere; margin-bottom: 12px; }
-    .transfers { border-top: 1px solid var(--border); padding-top: 11px; }
-    .transfers-head { display: flex; justify-content: space-between; align-items: center; color: var(--muted); margin-bottom: 8px; }
-    .transfer { border: 1px solid var(--border); border-radius: 8px; padding: 9px 10px; margin-top: 7px; }
-    .transfer-top, .transfer-bottom { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
-    .transfer-name { font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .transfer-state { color: var(--muted); font-size: 12px; white-space: nowrap; }
-    .transfer-destination, .transfer-error { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; margin-top: 3px; }
-    .transfer-error { color: var(--bad); }
-    .progress { height: 6px; border-radius: 99px; background: var(--panel-muted); overflow: hidden; margin: 8px 0 5px; }
-    .progress-bar { height: 100%; border-radius: inherit; background: var(--accent); transition: width .2s ease; }
-    .progress-bar.unknown { width: 38%; animation: move 1.2s infinite alternate ease-in-out; }
-    @keyframes move { from { transform: translateX(-10%); } to { transform: translateX(175%); } }
-    .transfer-actions { display: flex; gap: 6px; margin-top: 7px; }
-    .empty { color: var(--muted); padding: 14px 0 2px; }
-    .footnote { color: var(--muted); font-size: 12px; margin-top: 15px; }
-    @media (max-width: 700px) {
-      main { width: min(100% - 18px, 1180px); padding-top: 17px; }
-      header { display: block; }
-      .health { margin-top: 10px; text-align: left; }
-      .toolbar { display: block; }
-      .filter { width: 100%; margin-top: 10px; }
-      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .clients { grid-template-columns: 1fr; }
+    html, body { margin: 0; }
+    body { background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+    button, input, select { font: inherit; color: inherit; }
+    .mono { font-family: var(--mono); font-size: 12.5px; }
+    .muted { color: var(--muted); }
+    .shell { width: min(1120px, 100% - 32px); margin: 0 auto; padding: 0 0 48px; }
+
+    /* Top bar */
+    .topbar { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+    .topbar-inner { width: min(1120px, 100% - 32px); margin: 0 auto; display: flex; align-items: center; gap: 24px; height: 60px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; }
+    .logo { width: 26px; height: 26px; border-radius: 7px; background: linear-gradient(135deg, var(--accent), #8b5cf6); display: grid; place-items: center; color: #fff; }
+    .nav { display: flex; gap: 2px; background: var(--sunken); border: 1px solid var(--line); border-radius: 10px; padding: 3px; }
+    .nav button { border: 0; background: transparent; padding: 5px 14px; border-radius: 7px; color: var(--muted); cursor: pointer; font-weight: 520; display: flex; gap: 7px; align-items: center; }
+    .nav button:hover { color: var(--text); }
+    .nav button[aria-selected="true"] { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+    .count { font-size: 11px; font-weight: 600; min-width: 18px; padding: 0 6px; border-radius: 99px; background: var(--line); color: var(--muted); text-align: center; }
+    .nav button[aria-selected="true"] .count { background: var(--accent-soft); color: var(--accent-text); }
+    .live { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+    .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px var(--good-soft); }
+    .live-dot.failed { background: var(--bad); box-shadow: 0 0 0 3px var(--bad-soft); }
+
+    .view { padding-top: 28px; }
+    .view[hidden] { display: none; }
+    .view-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+    h1 { font-size: 22px; letter-spacing: -.02em; margin: 0; line-height: 1.2; }
+    h2 { font-size: 15px; margin: 0; letter-spacing: -.005em; }
+    .lede { color: var(--muted); margin: 4px 0 0; max-width: 62ch; }
+
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .alert { border-radius: 9px; padding: 9px 12px; font-size: 13px; overflow-wrap: anywhere; }
+    .alert.bad { background: var(--bad-soft); color: var(--bad); }
+    .alert.warn { background: var(--warn-soft); color: var(--warn); }
+
+    /* Transfers */
+    .filters { display: flex; gap: 6px; flex-wrap: wrap; }
+    .chip { border: 1px solid var(--line); background: var(--panel); border-radius: 99px; padding: 4px 12px; cursor: pointer; color: var(--muted); display: inline-flex; gap: 7px; align-items: center; font-size: 13px; }
+    .chip:hover { border-color: var(--line-strong); color: var(--text); }
+    .chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
+    .chip b { font-weight: 650; color: var(--text); }
+    .chip.active b { color: inherit; }
+    .search { position: relative; }
+    .search input { width: 260px; max-width: 100%; border: 1px solid var(--line); background: var(--panel); border-radius: 9px; padding: 7px 10px 7px 32px; outline: none; }
+    .search input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--faint); }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+
+    .list { overflow: hidden; }
+    .row { display: grid; grid-template-columns: 40px minmax(0, 1fr) 230px 110px 84px; gap: 16px; align-items: center; padding: 14px 18px; border-top: 1px solid var(--line); }
+    .row:first-child { border-top: 0; }
+    .row:hover { background: color-mix(in srgb, var(--sunken) 55%, transparent); }
+    .ext { width: 40px; height: 40px; border-radius: 9px; display: grid; place-items: center; font: 650 10px/1 var(--mono); letter-spacing: .02em; background: var(--sunken); color: var(--muted); border: 1px solid var(--line); text-transform: uppercase; overflow: hidden; }
+    .ext.k-doc { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+    .ext.k-img { background: var(--info-soft); color: var(--info); border-color: transparent; }
+    .ext.k-data { background: var(--good-soft); color: var(--good); border-color: transparent; }
+    .ext.k-model { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
+    .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sub { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12.5px; min-width: 0; margin-top: 2px; }
+    .sub .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+    .host { font: 600 11px/1 var(--mono); padding: 3px 6px; border-radius: 5px; background: var(--sunken); border: 1px solid var(--line); color: var(--text); white-space: nowrap; }
+    .tag { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 5px; background: var(--accent-soft); color: var(--accent-text); white-space: nowrap; }
+    .err { color: var(--bad); font-size: 12.5px; margin-top: 4px; overflow-wrap: anywhere; }
+    .bar { height: 6px; background: var(--sunken); border-radius: 99px; overflow: hidden; border: 1px solid var(--line); }
+    .bar i { display: block; height: 100%; background: var(--accent); border-radius: inherit; transition: width .4s ease; }
+    .bar.done i { background: var(--good); }
+    .bar.bad i { background: var(--bad); }
+    .bar.unknown i { width: 35%; animation: slide 1.3s infinite ease-in-out alternate; }
+    @keyframes slide { from { transform: translateX(-20%); } to { transform: translateX(210%); } }
+    .bytes { font-size: 12px; color: var(--muted); margin-top: 5px; font-variant-numeric: tabular-nums; display: flex; justify-content: space-between; gap: 8px; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 99px; white-space: nowrap; }
+    .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .pill.running { background: var(--info-soft); color: var(--info); }
+    .pill.running::before { animation: pulse 1.2s infinite; }
+    @keyframes pulse { 50% { opacity: .3; } }
+    .pill.queued { background: var(--warn-soft); color: var(--warn); }
+    .pill.completed { background: var(--good-soft); color: var(--good); }
+    .pill.error { background: var(--bad-soft); color: var(--bad); }
+    .pill.cancelled { background: var(--sunken); color: var(--muted); }
+    .actions { display: flex; justify-content: flex-end; }
+    .btn { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 5px 11px; cursor: pointer; font-weight: 550; font-size: 13px; white-space: nowrap; }
+    .btn:hover { border-color: var(--line-strong); background: var(--sunken); }
+    .btn:disabled { opacity: .5; cursor: wait; }
+    .btn.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); background: var(--bad-soft); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { filter: brightness(1.08); background: var(--accent); }
+    .btn.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+    .btn.ghost:hover { color: var(--text); background: var(--sunken); }
+    .empty { padding: 56px 20px; text-align: center; color: var(--muted); }
+    .empty strong { display: block; color: var(--text); font-size: 15px; margin-bottom: 4px; }
+
+    /* Clients */
+    .clients { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+    .client { padding: 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+    .client-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .client-head h2 { font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
+    .pill.online { background: var(--good-soft); color: var(--good); }
+    .pill.offline { background: var(--sunken); color: var(--muted); }
+    .kv { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 6px 12px; font-size: 13px; margin: 0; }
+    .kv dt { color: var(--muted); }
+    .kv dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .section-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--faint); font-weight: 650; margin-bottom: 8px; }
+    .subcard { background: var(--sunken); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+    .tunnel { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 3px 0; }
+    .tunnel a { color: var(--accent-text); text-decoration: none; font-family: var(--mono); font-size: 12.5px; }
+    .tunnel a:hover { text-decoration: underline; }
+    .socket { font-family: var(--mono); font-size: 11.5px; color: var(--faint); overflow-wrap: anywhere; border-top: 1px dashed var(--line); padding-top: 10px; }
+
+    /* Openers */
+    .settings { display: grid; gap: 16px; }
+    .card-head { padding: 16px 18px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .card-body { padding: 14px 18px; }
+    .rule { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto 34px; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+    .rule:first-child { border-top: 0; }
+    .rule-index { color: var(--faint); font: 12px var(--mono); text-align: center; }
+    .rule input { width: 100%; font-family: var(--mono); font-size: 13px; border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 7px 10px; outline: none; }
+    .rule input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .rule .hint { grid-column: 2 / -1; color: var(--warn); font-size: 12px; margin-top: -4px; }
+    .seg { display: inline-flex; background: var(--sunken); border: 1px solid var(--line); border-radius: 9px; padding: 2px; gap: 2px; }
+    .seg button { border: 0; background: transparent; border-radius: 7px; padding: 4px 11px; cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 520; white-space: nowrap; }
+    .seg button:hover { color: var(--text); }
+    .seg button[aria-pressed="true"] { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
+    .icon-btn { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--faint); cursor: pointer; }
+    .icon-btn:hover { background: var(--bad-soft); color: var(--bad); }
+    .fallback { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto 34px; gap: 10px; align-items: center; padding: 10px 0 2px; border-top: 1px dashed var(--line); color: var(--muted); font-size: 13px; }
+    .quick { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 12px; }
+    .quick span { color: var(--muted); font-size: 12.5px; margin-right: 2px; }
+    .opt { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+    .opt:first-child { border-top: 0; padding-top: 2px; }
+    .opt-label strong { display: block; font-weight: 580; }
+    .opt-label small { color: var(--muted); font-size: 12.5px; }
+    .savebar { position: sticky; bottom: 16px; display: flex; align-items: center; gap: 12px; padding: 10px 12px 10px 18px; margin-top: 4px; }
+    .savebar .state { color: var(--muted); font-size: 13px; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .savebar .state.dirty { color: var(--warn); font-weight: 550; }
+    .legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 2px; }
+    .legend div { font-size: 12.5px; color: var(--muted); }
+    .legend b { display: block; color: var(--text); font-weight: 600; font-size: 13px; }
+
+    @media (max-width: 860px) {
+      .row { grid-template-columns: 40px minmax(0, 1fr) auto; }
+      .row .progress-col { grid-column: 2 / -1; grid-row: 2; }
+      .row .state-col { grid-column: 3; grid-row: 1; }
+      .row .actions { grid-column: 2 / -1; justify-content: flex-start; }
+      .topbar-inner { gap: 12px; }
+      .brand span { display: none; }
+      .live-text { display: none; }
+      .rule { grid-template-columns: minmax(0, 1fr) 34px; }
+      .rule-index { display: none; }
+      .rule .seg { grid-column: 1 / -1; grid-row: 2; }
+      .rule .hint { grid-column: 1 / -1; }
+      .fallback { grid-template-columns: 1fr; }
+      .fallback > span:first-child { display: none; }
+      .legend { grid-template-columns: 1fr; }
+      .search input { width: 100%; }
+      .search { flex: 1; }
     }
   </style>
 </head>
 <body>
-  <main>
-    <header>
-      <div>
-        <h1>tmux-opener</h1>
-        <p class="subtitle">Local opener clients and file transfers</p>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="logo" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></div>
+        <span>tmux-opener</span>
       </div>
-      <p class="health"><span id="health-dot" class="health-dot"></span><span id="health-text">Connecting…</span></p>
-    </header>
+      <nav class="nav" role="tablist" aria-label="Sections">
+        <button type="button" role="tab" data-view="transfers" aria-selected="true">Transfers <span class="count" id="count-transfers">0</span></button>
+        <button type="button" role="tab" data-view="clients" aria-selected="false">Clients <span class="count" id="count-clients">0</span></button>
+        <button type="button" role="tab" data-view="openers" aria-selected="false">Openers</button>
+      </nav>
+      <div class="live" title="Status refreshes every second"><span id="live-dot" class="live-dot"></span><span id="live-text" class="live-text">Connecting…</span></div>
+    </div>
+  </header>
 
-    <section class="toolbar" aria-label="Transfer filters">
-      <nav id="tabs" class="tabs" aria-label="Transfer state"></nav>
-      <input id="filter" class="filter" type="search" placeholder="Filter host, file, or status" autocomplete="off">
+  <main class="shell">
+    <section class="view" id="view-transfers">
+      <div class="view-head">
+        <div>
+          <h1>Transfers</h1>
+          <p class="lede">Downloads and previews copied from remote hosts to this machine.</p>
+        </div>
+      </div>
+      <div class="toolbar">
+        <div class="filters" id="filters"></div>
+        <label class="search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <input id="filter" type="search" placeholder="Search files, hosts, errors" autocomplete="off" aria-label="Search transfers">
+        </label>
+      </div>
+      <div class="panel list" id="transfers" aria-live="polite"></div>
     </section>
 
-    <section id="summary" class="summary" aria-label="Summary"></section>
-    <section id="clients" class="clients" aria-live="polite"></section>
-    <p id="footnote" class="footnote">Status refreshes every second.</p>
+    <section class="view" id="view-clients" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Clients</h1>
+          <p class="lede">Local opener clients on this desktop. A recent remote report shows activity, not an open SSH connection.</p>
+        </div>
+      </div>
+      <div class="clients" id="clients"></div>
+    </section>
+
+    <section class="view" id="view-openers" hidden>
+      <div class="view-head">
+        <div>
+          <h1>Openers</h1>
+          <p class="lede">Choose how remote files open when you press <kbd>o</kbd> in tmux. Changes apply to every client on this desktop immediately.</p>
+        </div>
+      </div>
+      <div class="settings" id="settings"></div>
+    </section>
   </main>
 
   <script>
     (() => {
       "use strict";
-      const token = new URLSearchParams(location.hash.slice(1)).get("token");
-      const state = { snapshot: null, tab: "all", query: "", inFlight: false, lastGood: null, pendingActions: new Set() };
-      const tabs = [
-        ["all", "All"], ["running", "Running"], ["queued", "Queued"], ["completed", "Completed"], ["cancelled", "Cancelled"], ["error", "Error"]
-      ];
-      const byId = (id) => document.getElementById(id);
-      const make = (tag, className, text) => {
+      const params = new URLSearchParams(location.hash.slice(1));
+      const token = params.get("token");
+      const state = {
+        view: "transfers", snapshot: null, filter: "all", query: "", inFlight: false, lastGood: null,
+        pending: new Set(), settings: null, saved: null, settingsMeta: {}, saving: false, settingsError: null, savedAt: null,
+      };
+      const OPENERS = [["vscode", "VS Code"], ["preview", "Preview"], ["download", "Download"]];
+      const FILTERS = [["all", "All"], ["active", "Active"], ["completed", "Completed"], ["error", "Failed"], ["cancelled", "Cancelled"]];
+      const QUICK = [["*.pdf", "preview"], ["*.png", "preview"], ["*.jpg", "preview"], ["*.csv", "preview"], ["*.mp4", "preview"], ["*.pt", "download"]];
+      const KINDS = { doc: ["pdf", "md", "txt", "log", "tex"], img: ["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff"], data: ["csv", "tsv", "json", "h5", "hdf5", "npz", "npy", "parquet", "nc", "zarr"], model: ["pt", "pth", "ckpt", "safetensors", "onnx", "bin"] };
+      const $ = (id) => document.getElementById(id);
+      const el = (tag, cls, text) => {
         const node = document.createElement(tag);
-        if (className) node.className = className;
-        if (text !== undefined) node.textContent = String(text);
+        if (cls) node.className = cls;
+        if (text !== undefined && text !== null) node.textContent = String(text);
         return node;
       };
-      const value = (item, key, fallback = "—") => {
-        const result = item && item[key];
-        return result === undefined || result === null || result === "" ? fallback : String(result);
+      const svg = (path, size = 15) => {
+        const wrap = el("span");
+        wrap.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
+        return wrap.firstChild;
       };
-      const lower = (item) => String(item && item.state || "").toLowerCase();
-      const transferState = (download) => {
-        const raw = lower(download);
-        if (raw === "downloading") return "running";
-        if (["queued", "choosing_destination"].includes(raw)) return "queued";
-        if (raw === "completed") return "completed";
-        if (raw === "cancelled") return "cancelled";
-        if (["failed", "interrupted"].includes(raw)) return "error";
-        return raw || "queued";
+      const api = async (path, options = {}) => {
+        const response = await fetch(path, { cache: "no-store", ...options, headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json", ...(options.headers || {}) } });
+        let body = null;
+        try { body = await response.json(); } catch (_error) { body = null; }
+        if (!response.ok || !body || body.ok === false) throw new Error(body && typeof body.error === "string" ? body.error : `Request failed (${response.status})`);
+        return body;
       };
-      const allDownloads = () => {
-        const clients = state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
-        return clients.flatMap((client) => {
-          const downloads = Array.isArray(client.downloads) ? client.downloads : [];
-          return downloads.map((download) => ({ client, download }));
-        });
+      const text = (value, fallback = "—") => value === undefined || value === null || value === "" ? fallback : String(value);
+      const basename = (path) => String(path || "").replace(/\/+$/, "").split("/").pop() || String(path || "");
+      const dirname = (path) => { const parts = String(path || "").split("/"); parts.pop(); return parts.join("/") || "/"; };
+      const ago = (iso) => {
+        const time = Date.parse(iso);
+        if (!Number.isFinite(time)) return "—";
+        const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+        if (seconds < 45) return "just now";
+        if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+        if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+        return new Date(time).toLocaleDateString(undefined, { month: "short", day: "numeric" });
       };
-      const matches = ({ client, download }) => {
-        const kind = transferState(download);
-        if (state.tab !== "all" && kind !== state.tab) return false;
-        const query = state.query.trim().toLowerCase();
-        if (!query) return true;
-        return [client.host, download.id, download.ssh_host, download.path, download.destination, download.state, download.error]
-          .map((item) => String(item || "").toLowerCase()).some((item) => item.includes(query));
-      };
-      const setHealth = (kind, text) => {
-        const dot = byId("health-dot");
-        dot.className = `health-dot${kind ? ` ${kind}` : ""}`;
-        byId("health-text").textContent = text;
-      };
-      const renderTabs = () => {
-        const root = byId("tabs");
-        root.replaceChildren();
-        tabs.forEach(([id, label]) => {
-          const button = make("button", id === state.tab ? "active" : "", label);
-          button.type = "button";
-          button.addEventListener("click", () => { state.tab = id; render(); });
-          root.appendChild(button);
-        });
-      };
-      const renderSummary = () => {
-        const clients = state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
-        const transfers = allDownloads();
-        const metrics = [
-          ["Clients", clients.length],
-          ["Online", clients.filter((item) => item.online === true).length],
-          ["Active transfers", transfers.filter((item) => ["running", "queued"].includes(transferState(item.download))).length],
-          ["Errors", transfers.filter((item) => transferState(item.download) === "error" || item.client.online === false).length]
-        ];
-        const root = byId("summary");
-        root.replaceChildren();
-        metrics.forEach(([label, count]) => {
-          const card = make("div", "panel metric");
-          card.appendChild(make("span", "metric-label", label));
-          card.appendChild(make("span", "metric-value", count));
-          root.appendChild(card);
-        });
-      };
-      const formatBytes = (bytes) => {
-        const number = Number(bytes);
+      const bytes = (value) => {
+        const number = Number(value);
         if (!Number.isFinite(number) || number < 0) return "—";
         if (number < 1024) return `${number} B`;
         const units = ["KiB", "MiB", "GiB", "TiB"];
-        let value = number;
-        let index = -1;
-        do { value /= 1024; index += 1; } while (value >= 1024 && index < units.length - 1);
-        return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`;
+        let scaled = number, index = -1;
+        do { scaled /= 1024; index += 1; } while (scaled >= 1024 && index < units.length - 1);
+        return `${scaled.toFixed(scaled >= 100 ? 0 : 1)} ${units[index]}`;
       };
-      const renderTransfer = (client, download) => {
-        const stateName = transferState(download);
-        const actionKey = `${String(client.socket || "")}\u0000${String(download.id || "")}`;
-        const actionPending = state.pendingActions.has(actionKey);
-        const row = make("div", "transfer");
-        const top = make("div", "transfer-top");
-        const source = value(download, "path", value(download, "id", "Download"));
-        const name = make("span", "transfer-name", source.split("/").pop() || source);
-        name.title = source;
-        top.appendChild(name);
-        top.appendChild(make("span", "transfer-state", value(download, "state", stateName)));
-        row.appendChild(top);
-        row.appendChild(make("div", "transfer-destination", `Source: ${source}`));
-        if (download.destination) row.appendChild(make("div", "transfer-destination", `→ ${download.destination}`));
-        const receivedValue = Number(download.bytes_received);
-        const received = Number.isFinite(receivedValue) && receivedValue >= 0 ? receivedValue : 0;
-        const size = Number(download.size_bytes);
-        const knownSize = Number.isFinite(size) && size > 0;
-        const progress = make("div", "progress");
-        const bar = make("div", `progress-bar${knownSize ? "" : " unknown"}`);
-        if (knownSize) bar.style.width = `${Math.min(100, Math.max(0, received / size * 100))}%`;
-        progress.appendChild(bar);
-        row.appendChild(progress);
-        const bottom = make("div", "transfer-bottom");
-        bottom.appendChild(make("span", "transfer-state", knownSize ? `${formatBytes(received)} / ${formatBytes(size)}` : formatBytes(received)));
-        const actions = make("span", "transfer-actions");
-        if (stateName === "running" || stateName === "queued") {
-          const cancel = make("button", "action danger", actionPending ? "Working…" : "Cancel");
-          cancel.type = "button";
-          cancel.disabled = actionPending;
-          cancel.addEventListener("click", () => action(client, "cancel_download", download));
-          actions.appendChild(cancel);
-        } else if (stateName === "error" || stateName === "cancelled") {
-          const retry = make("button", "action", actionPending ? "Working…" : "Retry");
-          retry.type = "button";
-          retry.disabled = actionPending;
-          retry.addEventListener("click", () => action(client, "retry_download", download));
-          actions.appendChild(retry);
-        }
-        bottom.appendChild(actions);
-        row.appendChild(bottom);
-        if (download.error) row.appendChild(make("div", "transfer-error", download.error));
-        return row;
+      const kind = (download) => {
+        const raw = String(download && download.state || "").toLowerCase();
+        if (raw === "downloading") return "running";
+        if (raw === "queued" || raw === "choosing_destination") return "queued";
+        if (raw === "failed" || raw === "interrupted") return "error";
+        return raw || "queued";
       };
-      const renderClient = (client, filteredTransfers) => {
-        const card = make("article", "panel client");
-        const head = make("div", "client-head");
-        const title = make("div", "client-title");
-        title.appendChild(make("span", `status ${client.online ? "online" : "offline"}`, client.online ? "Online" : "Offline"));
-        title.appendChild(make("h2", "", value(client, "host", "Client")));
-        head.appendChild(title);
-        card.appendChild(head);
-        const info = client.client_info && typeof client.client_info === "object" ? client.client_info : {};
-        const machine = make("dl", "machine");
-        [["Machine", info.hostname], ["User", info.user], ["OS", info.os], ["PID", info.pid], ["Default SSH", info.default_ssh_host], ["Instance", info.instance_id], ["Socket", client.socket]]
-          .forEach(([label, item], index) => {
-            const wrap = make("div", index === 6 ? "wide" : "");
-            wrap.appendChild(make("dt", "", label));
-            wrap.appendChild(make("dd", "", item));
-            machine.appendChild(wrap);
-          });
-        card.appendChild(machine);
-        const hosts = Array.isArray(client.hosts) ? client.hosts : [];
-        if (hosts.length) {
-          const remoteHosts = make("div", "remote-hosts");
-          remoteHosts.appendChild(make("div", "remote-hosts-title", "Recent remote hosts"));
-          hosts.forEach((host) => {
-            const row = make("div", "remote-host");
-            const main = make("div", "remote-host-main");
-            main.appendChild(make("strong", "", value(host, "ssh_host", "Remote host")));
-            main.appendChild(make("span", "transfer-state", value(host, "last_seen")));
-            row.appendChild(main);
-            row.appendChild(make("div", "remote-host-meta", `${value(host, "user")}@${value(host, "hostname")} · ${value(host, "os")} · ${value(host, "cwd")}`));
-            remoteHosts.appendChild(row);
-          });
-          card.appendChild(remoteHosts);
-        }
-        if (client.error) card.appendChild(make("div", "error", client.error));
-        if (client.history_error) card.appendChild(make("div", "history-warning", `Transfer history: ${client.history_error}`));
-        const transfers = make("div", "transfers");
-        const transferHead = make("div", "transfers-head");
-        transferHead.appendChild(make("strong", "", "Transfers"));
-        transferHead.appendChild(make("span", "", `${filteredTransfers.length} shown`));
-        transfers.appendChild(transferHead);
-        if (!filteredTransfers.length) transfers.appendChild(make("p", "empty", "No transfers match this view."));
-        filteredTransfers.forEach((download) => transfers.appendChild(renderTransfer(client, download)));
-        card.appendChild(transfers);
-        return card;
+      const STATE_LABEL = { downloading: "Downloading", queued: "Queued", choosing_destination: "Choosing file", completed: "Completed", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
+      const clients = () => state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
+      const transfers = () => clients().flatMap((client) => (Array.isArray(client.downloads) ? client.downloads : []).map((download) => ({ client, download })));
+      const inFilter = (item, filter) => {
+        const k = kind(item.download);
+        if (filter === "all") return true;
+        if (filter === "active") return k === "running" || k === "queued";
+        return k === filter;
       };
-      const render = () => {
-        renderTabs();
-        renderSummary();
-        const root = byId("clients");
+      const matches = (item) => {
+        if (!inFilter(item, state.filter)) return false;
+        const query = state.query.trim().toLowerCase();
+        if (!query) return true;
+        const { client, download } = item;
+        return [client.host, download.ssh_host, download.path, download.destination, download.state, download.error]
+          .some((value) => String(value || "").toLowerCase().includes(query));
+      };
+      const setLive = (ok, message) => {
+        $("live-dot").className = `live-dot${ok ? "" : " failed"}`;
+        $("live-text").textContent = message;
+      };
+
+      /* Transfers ---------------------------------------------------- */
+      const renderFilters = () => {
+        const root = $("filters");
         root.replaceChildren();
-        const clients = state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
-        clients.forEach((client) => {
-          const transfers = (Array.isArray(client.downloads) ? client.downloads : []).filter((download) => matches({ client, download }));
-          const query = state.query.trim();
-          if (query && !transfers.length && !String(client.host || "").toLowerCase().includes(query.toLowerCase())) return;
-          root.appendChild(renderClient(client, transfers));
+        const all = transfers();
+        FILTERS.forEach(([id, label]) => {
+          const chip = el("button", `chip${state.filter === id ? " active" : ""}`);
+          chip.type = "button";
+          chip.append(el("span", "", label), el("b", "", all.filter((item) => inFilter(item, id)).length));
+          chip.addEventListener("click", () => { state.filter = id; renderTransfers(); });
+          root.append(chip);
         });
-        if (!clients.length) root.appendChild(make("p", "empty", "No configured clients found."));
       };
-      const action = async (client, actionName, download) => {
-        if (!token) { setHealth("failed", "Missing dashboard token"); return; }
-        const actionKey = `${String(client.socket || "")}\u0000${String(download.id || "")}`;
-        if (state.pendingActions.has(actionKey)) return;
-        state.pendingActions.add(actionKey);
-        render();
+      const extBadge = (path) => {
+        const name = basename(path);
+        const ext = name.includes(".") ? name.split(".").pop().toLowerCase().slice(0, 5) : "";
+        const group = Object.keys(KINDS).find((key) => KINDS[key].includes(ext));
+        return el("div", `ext${group ? ` k-${group}` : ""}`, ext || "file");
+      };
+      const action = async (client, name, download) => {
+        const key = `${client.socket}\u0000${download.id}`;
+        if (state.pending.has(key)) return;
+        state.pending.add(key);
+        renderTransfers();
         try {
-          const response = await fetch("/api/action", {
-            method: "POST",
-            headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ socket: client.socket, action: actionName, download_id: download.id })
-          });
-          let result = null;
-          try { result = await response.json(); } catch (_error) { result = null; }
-          if (!response.ok || !result || result.ok !== true) {
-            const detail = result && typeof result.error === "string" ? result.error : `Action failed (${response.status})`;
-            throw new Error(detail);
-          }
+          await api("/api/action", { method: "POST", body: JSON.stringify({ socket: client.socket, action: name, download_id: download.id }) });
           await refresh();
         } catch (error) {
-          setHealth("failed", error instanceof Error ? error.message : "Action failed");
+          setLive(false, error.message);
         } finally {
-          state.pendingActions.delete(actionKey);
-          render();
+          state.pending.delete(key);
+          renderTransfers();
         }
       };
+      const transferRow = ({ client, download }) => {
+        const k = kind(download);
+        const row = el("div", "row");
+        row.append(extBadge(download.path));
+
+        const main = el("div");
+        main.style.minWidth = "0";
+        const name = el("div", "name", basename(download.path) || text(download.id, "Download"));
+        name.title = text(download.path, "");
+        main.append(name);
+        const sub = el("div", "sub");
+        sub.append(el("span", "host", text(download.ssh_host || client.host, "local")));
+        if (download.preview) sub.append(el("span", "tag", "Preview"));
+        const path = el("span", "path mono", `‎${download.destination && k === "completed" ? `→ ${download.destination}` : dirname(download.path)}`);
+        path.title = download.destination ? `${download.path}\n→ ${download.destination}` : text(download.path, "");
+        sub.append(path);
+        main.append(sub);
+        if (download.error) main.append(el("div", "err", download.error));
+        row.append(main);
+
+        const progress = el("div", "progress-col");
+        const received = Math.max(0, Number(download.bytes_received) || 0);
+        const size = Number(download.size_bytes);
+        const known = Number.isFinite(size) && size > 0;
+        const bar = el("div", `bar${k === "completed" ? " done" : k === "error" ? " bad" : ""}${k === "running" && !known ? " unknown" : ""}`);
+        const fill = el("i");
+        if (k === "completed") fill.style.width = "100%";
+        else if (known) fill.style.width = `${Math.min(100, received / size * 100)}%`;
+        else if (k !== "running") fill.style.width = "0";
+        bar.append(fill);
+        progress.append(bar);
+        const info = el("div", "bytes");
+        info.append(el("span", "", known ? `${bytes(received)} of ${bytes(size)}` : bytes(received)));
+        info.append(el("span", "", k === "running" && known ? `${Math.floor(received / size * 100)}%` : ago(download.updated_at)));
+        progress.append(info);
+        row.append(progress);
+
+        const stateCol = el("div", "state-col");
+        stateCol.append(el("span", `pill ${k}`, STATE_LABEL[download.state] || text(download.state, "Unknown")));
+        row.append(stateCol);
+
+        const actions = el("div", "actions");
+        const busy = state.pending.has(`${client.socket}\u0000${download.id}`);
+        if (k === "running" || k === "queued") {
+          const button = el("button", "btn danger", busy ? "…" : "Cancel");
+          button.type = "button";
+          button.disabled = busy;
+          button.addEventListener("click", () => action(client, "cancel_download", download));
+          actions.append(button);
+        } else if (k === "error" || k === "cancelled") {
+          const button = el("button", "btn", busy ? "…" : "Retry");
+          button.type = "button";
+          button.disabled = busy;
+          button.addEventListener("click", () => action(client, "retry_download", download));
+          actions.append(button);
+        }
+        row.append(actions);
+        return row;
+      };
+      const renderTransfers = () => {
+        renderFilters();
+        const root = $("transfers");
+        const rank = { running: 0, queued: 1 };
+        const rows = transfers().filter(matches).sort((a, b) => (rank[kind(a.download)] ?? 2) - (rank[kind(b.download)] ?? 2)
+          || String(b.download.updated_at || "").localeCompare(String(a.download.updated_at || "")));
+        root.replaceChildren(...rows.map(transferRow));
+        if (!rows.length) {
+          const empty = el("div", "empty");
+          const none = !transfers().length;
+          empty.append(el("strong", "", none ? "No transfers yet" : "Nothing matches"));
+          empty.append(el("span", "", none ? "Select a path in tmux copy mode and press d, or add a Preview rule under Openers." : "Try another filter or search."));
+          root.append(empty);
+        }
+        $("count-transfers").textContent = transfers().filter((item) => inFilter(item, "active")).length || transfers().length;
+      };
+
+      /* Clients ------------------------------------------------------ */
+      const kv = (pairs) => {
+        const list = el("dl", "kv");
+        pairs.forEach(([label, value, mono]) => {
+          list.append(el("dt", "", label));
+          const dd = el("dd", mono ? "mono" : "", text(value));
+          dd.title = text(value, "");
+          list.append(dd);
+        });
+        return list;
+      };
+      const clientCard = (client) => {
+        const card = el("article", "panel client");
+        const info = client.client_info && typeof client.client_info === "object" ? client.client_info : {};
+        const head = el("div", "client-head");
+        const title = el("div");
+        title.style.minWidth = "0";
+        title.append(el("h2", "", text(client.host, "Client")));
+        title.append(el("div", "muted", client.online ? `${text(info.user, "?")}@${text(info.hostname, "?")} · ${text(info.os, "?")} · pid ${text(info.pid)}` : "Not responding"));
+        head.append(title, el("span", `pill ${client.online ? "online" : "offline"}`, client.online ? "Online" : "Offline"));
+        card.append(head);
+        if (client.error) card.append(el("div", "alert bad", client.error));
+        if (client.history_error) card.append(el("div", "alert warn", `Transfer history: ${client.history_error}`));
+        if (client.online) card.append(kv([["Started", ago(info.started_at)], ["Last request", ago(info.last_request_at)], ["Default host", info.default_ssh_host, true]]));
+
+        (Array.isArray(client.hosts) ? client.hosts : []).forEach((host) => {
+          const box = el("div", "subcard");
+          box.append(el("div", "section-label", `Remote · ${text(host.ssh_host)} · seen ${ago(host.last_seen)}`));
+          box.append(kv([["Machine", `${text(host.user, "?")}@${text(host.hostname, "?")}`], ["Directory", host.cwd, true], ["Pane", host.pane, true]]));
+          card.append(box);
+        });
+
+        const forwards = Array.isArray(client.remote_localhost_forwards) ? client.remote_localhost_forwards : [];
+        if (forwards.length) {
+          const box = el("div");
+          box.append(el("div", "section-label", "Tunnels"));
+          forwards.forEach((forward) => {
+            const line = el("div", "tunnel");
+            line.append(el("span", "host", `${text(forward.ssh_host)}:${text(forward.remote_port)}`), el("span", "muted", "→"));
+            const port = Number(forward.local_port);
+            if (Number.isInteger(port) && port > 0 && port < 65536) {
+              const link = el("a", "", `127.0.0.1:${port}`);
+              link.href = `http://127.0.0.1:${port}/`;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              line.append(link);
+            }
+            box.append(line);
+          });
+          card.append(box);
+        }
+        card.append(el("div", "socket", text(client.socket)));
+        return card;
+      };
+      const renderClients = () => {
+        const list = clients();
+        $("count-clients").textContent = `${list.filter((client) => client.online).length}/${list.length}`;
+        const root = $("clients");
+        root.replaceChildren(...list.map(clientCard));
+        if (!list.length) {
+          const empty = el("div", "panel empty");
+          empty.append(el("strong", "", "No clients configured"), el("span", "", "Run tmux-opener ssh HOST to set one up."));
+          root.append(empty);
+        }
+      };
+
+      /* Openers ------------------------------------------------------ */
+      const segmented = (options, current, onPick) => {
+        const group = el("div", "seg");
+        options.forEach(([value, label]) => {
+          const button = el("button", "", label);
+          button.type = "button";
+          button.setAttribute("aria-pressed", String(value === current));
+          button.addEventListener("click", () => onPick(value));
+          group.append(button);
+        });
+        return group;
+      };
+      const dirty = () => JSON.stringify(state.settings) !== JSON.stringify(state.saved);
+      const editSettings = (change) => { change(state.settings); state.settingsError = null; renderSettings(); };
+      const previewHint = (rule) => {
+        if (rule.opener !== "preview") return null;
+        const match = /\.([a-z0-9]+)$/i.exec(rule.pattern.trim());
+        const allowed = state.settingsMeta.preview_suffixes || [];
+        if (!match || !allowed.length || allowed.includes(`.${match[1].toLowerCase()}`)) return null;
+        return `Preview isn't available for .${match[1]} files (they could run code when opened). Use VS Code or Download.`;
+      };
+      const ruleRow = (rule, index) => {
+        const wrap = el("div", "rule");
+        wrap.append(el("span", "rule-index", index + 1));
+        const input = el("input");
+        input.value = rule.pattern;
+        input.placeholder = "*.pdf  or  */figures/*.png";
+        input.spellcheck = false;
+        input.setAttribute("aria-label", `Rule ${index + 1} pattern`);
+        input.addEventListener("input", () => { rule.pattern = input.value; updateSaveBar(); });
+        input.addEventListener("change", () => renderSettings());
+        wrap.append(input);
+        wrap.append(segmented(OPENERS, rule.opener, (value) => editSettings(() => { rule.opener = value; })));
+        const remove = el("button", "icon-btn");
+        remove.type = "button";
+        remove.title = "Remove rule";
+        remove.append(svg('<path d="M18 6 6 18M6 6l12 12"/>'));
+        remove.addEventListener("click", () => editSettings((settings) => settings.rules.splice(index, 1)));
+        wrap.append(remove);
+        const hint = previewHint(rule);
+        if (hint) wrap.append(el("div", "hint", hint));
+        return wrap;
+      };
+      const option = (title, detail, control) => {
+        const row = el("div", "opt");
+        const label = el("div", "opt-label");
+        label.append(el("strong", "", title), el("small", "", detail));
+        row.append(label, control);
+        return row;
+      };
+      const card = (title, detail, body) => {
+        const box = el("section", "panel");
+        const head = el("div", "card-head");
+        const label = el("div");
+        label.append(el("h2", "", title), el("p", "lede", detail));
+        head.append(label);
+        const content = el("div", "card-body");
+        content.append(...body);
+        box.append(head, content);
+        return box;
+      };
+      let saveState = null;
+      const updateSaveBar = () => {
+        if (!saveState) return;
+        const isDirty = dirty();
+        saveState.label.className = `state${isDirty || state.settingsError ? " dirty" : ""}`;
+        saveState.label.textContent = state.settingsError ? state.settingsError : isDirty ? "Unsaved changes" : state.savedAt ? `Saved ${new Date(state.savedAt).toLocaleTimeString()} · ${state.settingsMeta.path || ""}` : (state.settingsMeta.path || "");
+        saveState.save.disabled = !isDirty || state.saving;
+        saveState.discard.hidden = !isDirty;
+      };
+      const renderSettings = () => {
+        const root = $("settings");
+        if (!state.settings) {
+          root.replaceChildren(el("div", "panel empty", state.settingsError || "Loading settings…"));
+          return;
+        }
+        const settings = state.settings;
+        const nodes = [];
+        if (state.settingsMeta.error) nodes.push(el("div", "alert warn", state.settingsMeta.error));
+
+        const legend = el("div", "legend");
+        [["VS Code", "Open in VS Code Remote-SSH, at the selected line."], ["Preview", "Copy to this machine and open in the default app."], ["Download", "Save into your Downloads folder."]]
+          .forEach(([name, detail]) => { const item = el("div"); item.append(el("b", "", name), el("span", "", detail)); legend.append(item); });
+
+        const rules = el("div");
+        settings.rules.forEach((rule, index) => rules.append(ruleRow(rule, index)));
+        const fallback = el("div", "fallback");
+        fallback.append(el("span", "rule-index", "∗"), el("span", "", "Everything else, and all folders"), el("span", "tag", "VS Code"), el("span"));
+        rules.append(fallback);
+
+        const quick = el("div", "quick");
+        quick.append(el("span", "", "Add:"));
+        const add = el("button", "btn", "+ New rule");
+        add.type = "button";
+        add.addEventListener("click", () => {
+          editSettings((s) => s.rules.push({ pattern: "", opener: "preview" }));
+          const inputs = document.querySelectorAll(".rule input");
+          if (inputs.length) inputs[inputs.length - 1].focus();
+        });
+        quick.append(add);
+        QUICK.filter(([pattern]) => !settings.rules.some((rule) => rule.pattern === pattern)).forEach(([pattern, opener]) => {
+          const chip = el("button", "chip mono", pattern);
+          chip.type = "button";
+          chip.title = `${pattern} → ${opener}`;
+          chip.addEventListener("click", () => editSettings((s) => s.rules.push({ pattern, opener })));
+          quick.append(chip);
+        });
+
+        nodes.push(card("File rules", "Rules are checked top to bottom; the first match wins. Patterns without a slash match the file name; matching ignores case.", [legend, el("div", "", ""), rules, quick]));
+        legend.style.marginBottom = "12px";
+
+        const windows = [["new", "New window"], ["reuse", "Reuse window"]];
+        nodes.push(card("VS Code", "Window behaviour for remote files and folders. Flags passed to a client on the command line take precedence.", [
+          option("Files", "Opened with the pane's directory as workspace.", segmented(windows, settings.vscode_file_window, (v) => editSettings((s) => { s.vscode_file_window = v; }))),
+          option("Folders", "Opened as the workspace root.", segmented(windows, settings.vscode_folder_window, (v) => editSettings((s) => { s.vscode_folder_window = v; }))),
+        ]));
+        nodes.push(card("PDF viewer", "Used for previews and VimTeX output. Auto picks zathura on Linux or Skim on macOS when installed.", [
+          option("Viewer", "Previously TMUX_OPENER_PDF_VIEWER; that variable still overrides this.", segmented([["auto", "Auto"], ["zathura", "zathura"], ["skim", "Skim"], ["system", "System default"]], settings.pdf_viewer, (v) => editSettings((s) => { s.pdf_viewer = v; }))),
+        ]));
+
+        const bar = el("div", "panel savebar");
+        const label = el("span", "state");
+        const discard = el("button", "btn ghost", "Discard");
+        discard.type = "button";
+        discard.addEventListener("click", () => { state.settings = structuredClone(state.saved); state.settingsError = null; renderSettings(); });
+        const save = el("button", "btn primary", state.saving ? "Saving…" : "Save changes");
+        save.type = "button";
+        save.addEventListener("click", saveSettings);
+        bar.append(label, discard, save);
+        nodes.push(bar);
+        saveState = { label, save, discard };
+        root.replaceChildren(...nodes);
+        updateSaveBar();
+      };
+      const loadSettings = async () => {
+        try {
+          const body = await api("/api/settings");
+          state.saved = body.settings;
+          state.settings = structuredClone(body.settings);
+          state.settingsMeta = body;
+        } catch (error) {
+          state.settingsError = error.message;
+        }
+        renderSettings();
+      };
+      const saveSettings = async () => {
+        state.saving = true;
+        const settings = { ...state.settings, rules: state.settings.rules.filter((rule) => rule.pattern.trim()) };
+        try {
+          const body = await api("/api/settings", { method: "POST", body: JSON.stringify({ settings }) });
+          state.saved = body.settings;
+          state.settings = structuredClone(body.settings);
+          state.settingsMeta = body;
+          state.savedAt = Date.now();
+          state.settingsError = null;
+        } catch (error) {
+          state.settingsError = error.message;
+        } finally {
+          state.saving = false;
+          renderSettings();
+        }
+      };
+      window.addEventListener("beforeunload", (event) => { if (state.settings && dirty()) event.preventDefault(); });
+
+      /* Shell -------------------------------------------------------- */
+      const show = (view) => {
+        state.view = view;
+        document.querySelectorAll(".nav button").forEach((button) => button.setAttribute("aria-selected", String(button.dataset.view === view)));
+        ["transfers", "clients", "openers"].forEach((name) => { $(`view-${name}`).hidden = name !== view; });
+        if (view === "openers" && !state.settings) loadSettings();
+        try { localStorage.setItem("tmux-opener-view", view); } catch (_error) { /* optional */ }
+      };
+      document.querySelectorAll(".nav button").forEach((button) => button.addEventListener("click", () => show(button.dataset.view)));
+      $("filter").addEventListener("input", (event) => { state.query = event.target.value; renderTransfers(); });
+
       const refresh = async () => {
         if (state.inFlight || !token) return;
         state.inFlight = true;
         try {
-          const response = await fetch("/api/status", { headers: { "Authorization": `Bearer ${token}` }, cache: "no-store" });
-          if (!response.ok) throw new Error(`Status failed (${response.status})`);
-          const snapshot = await response.json();
-          if (!snapshot || !Array.isArray(snapshot.clients)) throw new Error("Invalid status response");
+          const snapshot = await api("/api/status");
+          if (!Array.isArray(snapshot.clients)) throw new Error("Invalid status response");
           state.snapshot = snapshot;
           state.lastGood = Date.now();
-          render();
-          setHealth("", `Updated ${new Date().toLocaleTimeString()}`);
-          byId("footnote").textContent = "Status refreshes every second.";
+          renderTransfers();
+          renderClients();
+          setLive(true, "Live");
         } catch (error) {
-          const age = state.lastGood ? ` · last good ${Math.round((Date.now() - state.lastGood) / 1000)}s ago` : "";
-          setHealth("failed", `${error instanceof Error ? error.message : "Refresh failed"}${age}`);
-          byId("footnote").textContent = "Live status unavailable; showing the last successful snapshot.";
+          const age = state.lastGood ? ` · last update ${Math.round((Date.now() - state.lastGood) / 1000)}s ago` : "";
+          setLive(false, `${error.message}${age}`);
         } finally {
           state.inFlight = false;
         }
       };
-      byId("filter").addEventListener("input", (event) => { state.query = event.target.value; render(); });
-      render();
+
+      if (!token) setLive(false, "Missing dashboard token; reopen from tmux-opener dashboard");
+      let initial = "transfers";
+      try { initial = params.get("view") || localStorage.getItem("tmux-opener-view") || initial; } catch (_error) { /* optional */ }
+      show(["transfers", "clients", "openers"].includes(initial) ? initial : "transfers");
+      renderTransfers();
+      renderClients();
       refresh();
       window.setInterval(refresh, 1000);
     })();

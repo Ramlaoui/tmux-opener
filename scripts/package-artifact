@@ -69,6 +69,7 @@ case "${kind}" in
       "bin/tmux-opener"
       "bin/tmux-opener-client"
       "lib/tmux_opener_downloads.py"
+      "lib/tmux_opener_settings.py"
       "lib/tmux_opener_dashboard.py"
       "lib/dashboard.html"
       "scripts/tmux-opener-status"

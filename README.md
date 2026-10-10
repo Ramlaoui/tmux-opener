@@ -160,9 +160,11 @@ client bridge; they do not use the same-host opener fallback.
 
 Press **prefix + `O`** (capital O) on the host to open the live tmux dashboard.
 It shows the desktop client's machine, user, OS and process, the current remote
-host/pane information, and recent downloads. Use the arrow keys or `j`/`k` to
-select a download, `c` to cancel it, `r` to retry a failed, cancelled or interrupted
-transfer, and `q` to close the popup. Configure the shortcut with:
+host/pane information, and recent downloads with progress bars. Use the arrow
+keys or `j`/`k` to select a download, `c` to cancel it, `r` to retry a failed,
+cancelled or interrupted transfer, `Tab` to switch to the
+[Openers](#opener-rules) view, and `q` to close the popup. Configure the
+shortcut with:
 
 ```tmux
 set -g @tmux_opener_dashboard_key 'O'
@@ -179,7 +181,7 @@ tmux-opener downloads --json
 ```
 
 The browser dashboard runs on a temporary loopback port and supports the same
-cancel/retry actions. It polls local client sockets, including custom sockets in
+cancel/retry actions, plus a Clients page and an Openers settings page. It polls local client sockets, including custom sockets in
 managed SSH snippets, and displays configured offline clients. `--no-browser`
 prints its local URL instead of opening a browser. Keep the command running
 while using the page; Ctrl-C closes the dashboard server.
@@ -261,7 +263,8 @@ Defaults:
 - Prefix target picker key: `o`
 - Remote socket: `/tmp/tmux-opener-$USER.sock`
 - Remote folders open in a new VS Code Remote-SSH window
-- Remote files open in a new VS Code Remote-SSH window rooted at the pane cwd
+- Remote files open in a new VS Code Remote-SSH window rooted at the pane cwd,
+  unless an [opener rule](#opener-rules) matches
 - Remote `localhost:PORT` URLs open through a local SSH `-L` tunnel
 - Fallback: if the bridge is unavailable, copy-mode uses same-host `open` or
   `xdg-open`
@@ -285,6 +288,48 @@ fallback path.
 ```sh
 tmux-opener-client --allow-ssh-host HOST
 ```
+
+### Opener rules
+
+Desktop settings live in `~/.config/tmux-opener/settings.json` (or
+`$XDG_CONFIG_HOME/tmux-opener/settings.json`) and apply to every client on that
+desktop without a restart. Edit them on the **Openers** page of
+`tmux-opener dashboard`, or with `Tab` in either tmux dashboard: `←`/`→` change
+the selected value, `a` adds a rule, `x` deletes it and `J`/`K` reorder.
+
+Rules map remote **file** paths to an opener; the first match wins and folders
+always open in VS Code:
+
+| Opener | Effect |
+| --- | --- |
+| `vscode` | VS Code Remote-SSH at the selected line (default) |
+| `preview` | Copy into `~/.cache/tmux-opener/preview/` and open locally (PDFs use the PDF viewer below) |
+| `download` | Queue a normal download into Downloads |
+
+```json
+{
+  "rules": [
+    {"pattern": "*.pdf", "opener": "preview"},
+    {"pattern": "*/figures/*.png", "opener": "preview"},
+    {"pattern": "*.ckpt", "opener": "download"}
+  ],
+  "vscode_file_window": "new",
+  "vscode_folder_window": "new",
+  "pdf_viewer": "auto"
+}
+```
+
+Patterns are case-insensitive shell globs; a pattern without `/` matches the
+file name, otherwise the full remote path. `pdf_viewer` is `auto`, `zathura`,
+`skim` or `system`; window policies are `new` or `reuse`. Command-line flags
+(`--vscode-file-window`, `--vscode-folder-window`, `--pdf-viewer`) and
+`TMUX_OPENER_PDF_VIEWER` override the file.
+
+Settings never contain commands, because a forwarded remote session can edit
+them. For the same reason `preview` only accepts documents, images, audio and
+video (`.pdf`, `.md`, `.txt`, `.csv`, `.png`, `.mp4`, …); formats that can run
+code when opened, such as `.html`, `.svg`, `.command` or office files, are
+refused. Use `download` for those.
 
 ## Troubleshooting
 

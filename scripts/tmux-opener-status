@@ -7,6 +7,7 @@ import argparse
 import curses
 import getpass
 import json
+import locale
 import os
 import platform
 import shutil
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -264,74 +266,6 @@ def format_bytes(value: object) -> str:
     return f"{scaled:.1f} {unit}"
 
 
-def format_progress(download: Mapping[str, object]) -> str:
-    received = _number(download.get("bytes_received"))
-    size = _number(download.get("size_bytes"))
-    if size is not None and size > 0 and received is not None:
-        percent = min(100.0, max(0.0, received * 100.0 / size))
-        return f"{format_bytes(received)}/{format_bytes(size)} ({percent:.0f}%)"
-    if received is not None:
-        return format_bytes(received)
-    if size is not None and size > 0:
-        return f"-/{format_bytes(size)}"
-    return "unknown"
-
-
-def _download_rows(downloads: list[object]) -> list[Mapping[str, object]]:
-    return [item for item in downloads if isinstance(item, Mapping)]
-
-
-STATE_LABELS = {
-    "queued": "queued",
-    "choosing_destination": "choose",
-    "downloading": "down",
-    "completed": "done",
-    "failed": "failed",
-    "cancelled": "cancel",
-    "interrupted": "interr",
-}
-
-
-def compact_state(value: object) -> str:
-    state = sanitize_terminal_text(value)
-    return STATE_LABELS.get(state, state or "unknown")
-
-
-def _clip_field(value: object, width: int, *, align_right: bool = False) -> str:
-    text = _optional_text(value)
-    if len(text) > width:
-        text = text[: max(width - 1, 0)] + "…" if width > 0 else ""
-    return text.rjust(width) if align_right else text.ljust(width)
-
-
-def _basename(value: object) -> str:
-    path = sanitize_terminal_text(value)
-    if not path:
-        return "-"
-    return path.rstrip("/").rsplit("/", 1)[-1] or path
-
-
-def format_table_progress(download: Mapping[str, object]) -> str:
-    received = _number(download.get("bytes_received"))
-    size = _number(download.get("size_bytes"))
-    if size is not None and size > 0 and received is not None:
-        return f"{min(100, max(0, received * 100 // size))}%"
-    if received is not None:
-        return format_bytes(received)
-    return "?"
-
-
-def format_download_row(download: Mapping[str, object], selected: bool = False) -> str:
-    """Render one compact row; full paths and errors live in the detail block."""
-
-    marker = ">" if selected else " "
-    identifier = _clip_field(download.get("id"), 8)
-    host = _clip_field(download.get("ssh_host") or "local", 10)
-    state = _clip_field(compact_state(download.get("state")), 7)
-    progress = _clip_field(format_table_progress(download), 7, align_right=True)
-    return f"{marker} {identifier} {host} {state} {progress} {_basename(download.get('path'))}"
-
-
 def _current_host(snapshot: Mapping[str, object], ssh_host: str | None = None) -> Mapping[str, object] | None:
     hosts = snapshot.get("hosts")
     if not isinstance(hosts, list):
@@ -347,94 +281,269 @@ def _current_host(snapshot: Mapping[str, object], ssh_host: str | None = None) -
     return candidates[0] if candidates else None
 
 
-def _snapshot_sections(
-    snapshot: Mapping[str, object],
-    *,
-    ssh_host: str | None = None,
-    pane: str | None = None,
-    selected: int = 0,
-) -> tuple[list[str], list[Mapping[str, object]], list[str]]:
+def snapshot_downloads(snapshot: Mapping[str, object] | None) -> list[Mapping[str, object]]:
+    """Transfers in display order: running, queued, then most recently updated."""
+
+    downloads = snapshot.get("downloads") if snapshot else None
+    rows = [item for item in downloads if isinstance(item, Mapping)] if isinstance(downloads, list) else []
+    rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    rank = {"downloading": 0, "choosing_destination": 1, "queued": 1}
+    return sorted(rows, key=lambda item: rank.get(str(item.get("state")), 2))
+
+
+# Rendering works on lines of (text, style) segments. Styles are space-separated
+# names resolved to curses attributes; the plain-text view just joins the text.
+Segment = tuple[str, str]
+Line = list[Segment]
+
+UTF8 = "utf" in (sys.stdout.encoding or locale.getpreferredencoding(False) or "").lower()
+GLYPHS = (
+    {"run": "●", "wait": "○", "ok": "✓", "fail": "✗", "off": "–", "fill": "━", "empty": "─", "select": "›",
+     "rule": "─", "arrow": "→", "dot": "·", "left": "‹", "right": "›", "up": "↑", "down": "↓"}
+    if UTF8 else
+    {"run": "*", "wait": "o", "ok": "+", "fail": "x", "off": "-", "fill": "#", "empty": "-", "select": ">",
+     "rule": "-", "arrow": "->", "dot": "|", "left": "<", "right": ">", "up": "^", "down": "v"}
+)
+# state -> (style, glyph, label)
+STATE_LOOK = {
+    "downloading": ("info", "run", "downloading"),
+    "queued": ("warn", "wait", "queued"),
+    "choosing_destination": ("warn", "wait", "choosing file"),
+    "completed": ("good", "ok", "done"),
+    "failed": ("bad", "fail", "failed"),
+    "interrupted": ("bad", "fail", "interrupted"),
+    "cancelled": ("dim", "off", "cancelled"),
+}
+OPENER_LABELS = {"vscode": "VS Code", "preview": "Preview", "download": "Download"}
+SETTING_ROWS = (
+    ("vscode_file_window", "VS Code files", ("new", "reuse")),
+    ("vscode_folder_window", "VS Code folders", ("new", "reuse")),
+    ("pdf_viewer", "PDF viewer", ("auto", "zathura", "skim", "system")),
+)
+
+
+def plain(line: Line) -> str:
+    return "".join(text for text, _style in line)
+
+
+def _clip(value: object, width: int) -> str:
+    text = _optional_text(value)
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+def _clip_left(value: object, width: int) -> str:
+    """Clip from the left so the informative end of a path stays visible."""
+
+    text = _optional_text(value)
+    if width <= 0:
+        return ""
+    return text if len(text) <= width else "…" + text[-(width - 1):]
+
+
+def _basename(value: object) -> str:
+    path = sanitize_terminal_text(value)
+    if not path:
+        return "-"
+    return path.rstrip("/").rsplit("/", 1)[-1] or path
+
+
+def _ago(value: object) -> str:
+    try:
+        moment = datetime.fromisoformat(str(value))
+        seconds = (datetime.now(timezone.utc) - moment).total_seconds()
+    except (TypeError, ValueError):
+        return "-"
+    if seconds < 45:
+        return "just now"
+    if seconds < 3600:
+        return f"{round(seconds / 60)}m ago"
+    if seconds < 86400:
+        return f"{round(seconds / 3600)}h ago"
+    return f"{round(seconds / 86400)}d ago"
+
+
+def _pad(line: Line, width: int, style: str = "") -> Line:
+    missing = width - len(plain(line))
+    return line + [(" " * missing, style)] if missing > 0 else line
+
+
+def _joined(parts: list[str]) -> str:
+    return f" {GLYPHS['dot']} ".join(part for part in parts if part and part != "-")
+
+
+def _header(title: str, right: str, width: int) -> Line:
+    left: Line = [(" tmux-opener ", "brand"), (f" {title}", "header")]
+    gap = max(width - 1 - len(plain(left)) - len(right) - 1, 1)
+    return left + [(" " * gap, "header"), (f"{right} ", "header")]
+
+
+def _tabs(view: str) -> Line:
+    line: Line = [(" ", "")]
+    for name, label in (("transfers", "Transfers"), ("openers", "Openers")):
+        line += [(f" {label} ", "tab-on" if name == view else "dim"), (" ", "")]
+    return line + [("  tab to switch", "dim")]
+
+
+def _label(text: str) -> Segment:
+    return (f" {text:<10}", "label")
+
+
+def _summary_lines(snapshot: Mapping[str, object], ssh_host: str | None, pane: str | None) -> list[Line]:
     client = snapshot.get("client_info")
     client = client if isinstance(client, Mapping) else {}
-    default_host = _optional_text(client.get("default_ssh_host"))
-    client_name = _optional_text(client.get("hostname"))
-    client_user = _optional_text(client.get("user"))
-    client_os = _optional_text(client.get("os"))
-    client_pid = _optional_text(client.get("pid"))
+    lines: list[Line] = []
     local_clients = snapshot.get("clients")
     if isinstance(local_clients, list):
-        lines = ["tmux-opener desktop dashboard", "Local clients:"]
+        first = True
         for local_client in local_clients:
             if not isinstance(local_client, Mapping):
                 continue
-            alias = _optional_text(local_client.get("host"), "(unnamed)")
+            alias = _clip(local_client.get("host") or "(unnamed)", 14).ljust(14)
+            prefix = _label("CLIENTS" if first else "")
+            first = False
             if local_client.get("online") is True:
                 info = local_client.get("client_info")
                 info = info if isinstance(info, Mapping) else {}
-                lines.append(
-                    f"  {alias}: online {_optional_text(info.get('user'))}@{_optional_text(info.get('hostname'))}"
-                    f" OS={_optional_text(info.get('os'))} pid={_optional_text(info.get('pid'))}"
-                )
+                detail = _joined([f"{_optional_text(info.get('user'))}@{_optional_text(info.get('hostname'))}",
+                                  _optional_text(info.get("os")), f"pid {_optional_text(info.get('pid'))}",
+                                  f"last request {_ago(info.get('last_request_at'))}"])
+                lines.append([prefix, (GLYPHS["run"] + " ", "good"), (alias, "bold"), (" " + detail, "")])
             else:
-                lines.append(f"  {alias}: offline ({_optional_text(local_client.get('error'))})")
-        selected_alias = _optional_text(snapshot.get("selected_client"), "(none online)")
-        lines.extend(
-            [
-                f"Selected client: {selected_alias}",
-                f"  {client_user}@{client_name}  OS={client_os}  pid={client_pid}  default SSH={default_host}",
-                f"  started={_optional_text(client.get('started_at'))}  last request={_optional_text(client.get('last_request_at'))}",
-            ]
-        )
+                lines.append([prefix, (GLYPHS["wait"] + " ", "dim"), (alias, "dim"),
+                              (" offline: " + _optional_text(local_client.get("error")), "dim")])
+        if first:
+            lines.append([_label("CLIENTS"), ("no desktop clients configured; run tmux-opener ssh HOST", "dim")])
     else:
-        lines = [
-            "tmux-opener host dashboard",
-            f"Client: {client_user}@{client_name}",
-            f"  OS={client_os}  pid={client_pid}  default SSH={default_host}",
-            f"  started={_optional_text(client.get('started_at'))}",
-            f"  last request={_optional_text(client.get('last_request_at'))}",
-        ]
+        detail = _joined([f"{_optional_text(client.get('user'))}@{_optional_text(client.get('hostname'))}",
+                          _optional_text(client.get("os")), f"pid {_optional_text(client.get('pid'))}",
+                          f"started {_ago(client.get('started_at'))}", f"last request {_ago(client.get('last_request_at'))}"])
+        lines.append([_label("CLIENT"), (GLYPHS["run"] + " ", "good"), (detail, "")])
 
     host = _current_host(snapshot, ssh_host)
     if host is None:
-        lines.extend(["Remote host report (recent terminal report; does not indicate active SSH)", "  no recent terminal host metadata"])
+        lines.append([_label("REMOTE"), ("no recent terminal report", "dim")])
     else:
-        alias = _optional_text(host.get("ssh_host"), "(no alias)")
-        lines.extend(
-            [
-                "Remote host report (recent terminal report; does not indicate active SSH)",
-                f"  Host: {alias}  machine={_optional_text(host.get('hostname'))}",
-                f"  OS={_optional_text(host.get('os'))}  user={_optional_text(host.get('user'))}  pane={_optional_text(host.get('pane') or pane)}",
-                f"  cwd={_optional_text(host.get('cwd'))}",
-                f"  last seen={_optional_text(host.get('last_seen'))}",
-            ]
-        )
-
-    lines.extend(["", "Transfers (arrows or j/k select; c cancel; r retry; q quit):", "  ID       HOST       STATE   PROGRESS FILE"])
-    downloads = _download_rows(snapshot.get("downloads", [])) if isinstance(snapshot.get("downloads"), list) else []
-    if not downloads:
-        lines.append("  (none)")
-
-    details: list[str] = []
-    if downloads:
-        selected = min(max(selected, 0), len(downloads) - 1)
-        download = downloads[selected]
-        details = [
-            "",
-            "Selected transfer:",
-            f"  id={_optional_text(download.get('id'))}  host={_optional_text(download.get('ssh_host'), 'local')}  state={_optional_text(download.get('state'), 'unknown')}",
-            f"  source: {_optional_text(download.get('path'))}",
-            f"  destination: {_optional_text(download.get('destination'))}",
-            f"  progress: {format_progress(download)}",
-            f"  error: {_optional_text(download.get('error'))}",
-        ]
-    else:
-        details = ["", "Selected transfer: none"]
+        detail = _joined([f"{_optional_text(host.get('user'))}@{_optional_text(host.get('hostname'))}",
+                          _optional_text(host.get("os")), f"pane {_optional_text(host.get('pane') or pane)}",
+                          f"seen {_ago(host.get('last_seen'))}"])
+        lines.append([_label("REMOTE"), (_optional_text(host.get("ssh_host"), "(no alias)"), "accent bold"), ("  " + detail, "")])
+        lines.append([_label(""), (_optional_text(host.get("cwd")), "dim")])
+    lines.append([_label(""), ("last terminal report; does not indicate active SSH", "dim")])
 
     forwards = snapshot.get("remote_localhost_forwards")
     if isinstance(forwards, list) and forwards:
-        details.extend(["", f"Remote localhost forwards: {len(forwards)}"])
+        tunnels = []
+        for forward in forwards[:4]:
+            if isinstance(forward, Mapping) and "remote_port" in forward:
+                tunnels.append(f"{_optional_text(forward.get('ssh_host'))}:{_optional_text(forward.get('remote_port'))}"
+                               f" {GLYPHS['arrow']} 127.0.0.1:{_optional_text(forward.get('local_port'))}")
+        more = f"  +{len(forwards) - 4} more" if len(forwards) > 4 else ""
+        lines.append([_label("TUNNELS"), ("   ".join(tunnels) or f"{len(forwards)} forwarded", ""), (more, "dim")])
+    return lines
 
-    return lines, downloads, details
+
+def format_progress(download: Mapping[str, object]) -> str:
+    received = _number(download.get("bytes_received"))
+    size = _number(download.get("size_bytes"))
+    if size is not None and size > 0 and received is not None:
+        percent = min(100.0, max(0.0, received * 100.0 / size))
+        return f"{format_bytes(received)} of {format_bytes(size)} ({percent:.0f}%)"
+    if received is not None:
+        return format_bytes(received)
+    if size is not None and size > 0:
+        return f"- of {format_bytes(size)}"
+    return "unknown"
+
+
+def _progress_bar(download: Mapping[str, object], width: int) -> Line:
+    received = _number(download.get("bytes_received"))
+    size = _number(download.get("size_bytes"))
+    state = str(download.get("state") or "")
+    if state == "completed":
+        filled = width
+    elif size and received is not None:
+        filled = min(width, received * width // size)
+    else:
+        filled = 0
+    style = {"completed": "good", "downloading": "info"}.get(state, "dim")
+    return [(GLYPHS["fill"] * filled, style), (GLYPHS["empty"] * (width - filled), "faint")]
+
+
+def transfer_line(download: Mapping[str, object], width: int, selected: bool = False) -> Line:
+    state = str(download.get("state") or "")
+    style, glyph, label = STATE_LOOK.get(state, ("dim", "wait", sanitize_terminal_text(state) or "unknown"))
+    received = _number(download.get("bytes_received"))
+    size = _number(download.get("size_bytes"))
+    if size and received is not None and state not in ("completed", "cancelled"):
+        amount = f"{min(100, received * 100 // size):>3}% of {format_bytes(size)}"
+    elif size:
+        amount = format_bytes(size)
+    else:
+        amount = format_bytes(received) if received else ""
+    bar_width = 16 if width >= 96 else 10 if width >= 76 else 0
+    fixed = 2 + 2 + 12 + (bar_width + 2 if bar_width else 0) + 19 + 13
+    name_width = max(width - 1 - fixed, 10)
+    name = _basename(download.get("path"))
+    if download.get("preview"):
+        name = f"{name} (preview)"
+    line: Line = [
+        (f" {GLYPHS['select'] if selected else ' '}", "accent bold"),
+        (GLYPHS[glyph] + " ", style),
+        (_clip(name, name_width).ljust(name_width), "bold" if state in ("downloading", "queued") else ""),
+        ("  " + _clip(download.get("ssh_host") or "local", 10).ljust(10), "dim"),
+    ]
+    if bar_width:
+        line += [("  ", "")] + _progress_bar(download, bar_width)
+    line += [("  " + amount.ljust(17)[:17], "dim"), (label.rjust(13)[:13], style)]
+    if selected:
+        line = [(text, "sel") for text, _style in _pad(line, width - 1)]
+    return line
+
+
+def _detail_lines(download: Mapping[str, object] | None, width: int) -> list[Line]:
+    rule = GLYPHS["rule"]
+    if download is None:
+        return [[(" " + rule * max(width - 2, 0), "faint")], [("  no transfers yet: select a path in copy mode and press d", "dim")]]
+    title = f" {rule * 2} {_basename(download.get('path'))} "
+    state = str(download.get("state") or "")
+    style, _glyph, label = STATE_LOOK.get(state, ("dim", "wait", sanitize_terminal_text(state) or "unknown"))
+    lines: list[Line] = [
+        [(title, "bold"), (rule * max(width - 2 - len(title), 0), "faint")],
+        [("  source  ", "label"), (f"{_optional_text(download.get('ssh_host'), 'local')}:", "accent"),
+         (_clip_left(download.get("path"), width - 14 - len(_optional_text(download.get("ssh_host"), "local"))), "")],
+        [("  saved   ", "label"), (_clip_left(download.get("destination"), width - 12), "")],
+        [("  status  ", "label"), (label, style), (f"  {format_progress(download)}", "dim"),
+         (f"  {GLYPHS['dot']} updated {_ago(download.get('updated_at'))}", "dim")],
+    ]
+    error = sanitize_terminal_text(download.get("error"))
+    lines.append([("  error   ", "label"), (_clip(error, width - 12), "bad")] if error else [])
+    return lines
+
+
+def _counts(downloads: list[Mapping[str, object]]) -> str:
+    states = [str(item.get("state") or "") for item in downloads]
+    parts = [
+        (sum(state in ("downloading", "queued", "choosing_destination") for state in states), "active"),
+        (states.count("completed"), "done"),
+        (sum(state in ("failed", "interrupted") for state in states), "failed"),
+    ]
+    return _joined([f"{count} {name}" for count, name in parts if count])
+
+
+def transfer_sections(
+    snapshot: Mapping[str, object], *, ssh_host: str | None, pane: str | None, selected: int, width: int,
+) -> tuple[list[Line], list[Line], list[Line], int]:
+    """Return fixed top lines, transfer rows, detail lines and clamped selection."""
+
+    title = "desktop dashboard" if isinstance(snapshot.get("clients"), list) else "host dashboard"
+    top = [_header(title, ssh_host or "", width), []] + _summary_lines(snapshot, ssh_host, pane)
+    downloads = snapshot_downloads(snapshot)
+    top += [[], [(" TRANSFERS ", "label"), (f" {_counts(downloads) or 'none'}", "dim")]]
+    selected = min(max(selected, 0), max(len(downloads) - 1, 0))
+    rows = [transfer_line(download, width, index == selected) for index, download in enumerate(downloads)]
+    return top, rows, _detail_lines(downloads[selected] if downloads else None, width), selected
 
 
 def render_snapshot_lines(
@@ -445,67 +554,260 @@ def render_snapshot_lines(
     selected: int = 0,
     width: int | None = None,
 ) -> list[str]:
-    """Render one plain-text snapshot; the curses view uses the same sections."""
+    """Render one plain-text snapshot with the same sections as the live view."""
 
-    lines, downloads, details = _snapshot_sections(snapshot, ssh_host=ssh_host, pane=pane, selected=selected)
-    if downloads:
-        selected = min(max(selected, 0), len(downloads) - 1)
-        lines.extend(format_download_row(download, selected=index == selected) for index, download in enumerate(downloads))
-    lines.extend(details)
-
+    top, rows, details, _selected = transfer_sections(snapshot, ssh_host=ssh_host, pane=pane, selected=selected, width=width or 100)
+    lines = [plain(line).rstrip() for line in top + rows + details]
     if width is not None and width > 1:
         return [line[: width - 1] for line in lines]
     return lines
 
 
-def render_curses_lines(
-    snapshot: Mapping[str, object],
-    *,
-    ssh_host: str | None,
-    pane: str | None,
-    selected: int,
-    width: int,
-    height: int,
-    footer: str | None = None,
-) -> list[str]:
-    """Render a height-bounded view while keeping the selected row visible."""
-
-    top, downloads, details = _snapshot_sections(snapshot, ssh_host=ssh_host, pane=pane, selected=selected)
-    footer_line = footer or "q quit | arrows/j/k select | c cancel | r retry"
-    if not downloads:
-        top.extend(details)
-        top.append(footer_line)
-        return [line[: max(width - 1, 1)] for line in top[: max(height, 0)]]
-
-    selected = min(max(selected, 0), len(downloads) - 1)
-    row_lines = [format_download_row(download, selected=index == selected) for index, download in enumerate(downloads)]
-    # Keep the machine summary, detail block, and footer fixed while scrolling
-    # only the transfer rows. This makes arrow navigation observable on small
-    # 100x28 (and smaller) popups.
-    available = height - len(top) - len(details) - 1
-    if available < 1:
-        keep_top = max(height - len(details) - 2, 1)
-        top = top[:keep_top]
-        available = max(height - len(top) - len(details) - 1, 1)
-    available = min(available, len(row_lines))
-    first = min(max(selected - available + 1, 0), max(len(row_lines) - available, 0))
-    visible_rows = row_lines[first : first + available]
-    lines = top + visible_rows + details + [footer_line]
-    return [line[: max(width - 1, 1)] for line in lines[: max(height, 0)]]
+def _hints(pairs: list[tuple[str, str]], message: str | None = None) -> Line:
+    line: Line = [(" ", "")]
+    for key, label in pairs:
+        line += [(key, "key"), (f" {label}   ", "dim")]
+    if message:
+        line += [(message, "accent")]
+    return line
 
 
-def _display_error(screen: Any, message: str) -> None:
+TRANSFER_HINTS = [("↑↓" if UTF8 else "j/k", "select"), ("c", "cancel"), ("r", "retry"), ("tab", "openers"), ("q", "quit")]
+OPENER_HINTS = [("↑↓" if UTF8 else "j/k", "select"), ("←→", "change"), ("a", "add"), ("x", "delete"), ("J/K", "move"),
+                ("tab", "transfers"), ("q", "quit")]
+
+
+def render_transfers_view(
+    snapshot: Mapping[str, object], *, ssh_host: str | None, pane: str | None, selected: int, width: int, height: int,
+    message: str | None = None,
+) -> list[Line]:
+    """Height-bounded transfer view; only the transfer rows scroll."""
+
+    top, rows, details, selected = transfer_sections(snapshot, ssh_host=ssh_host, pane=pane, selected=selected, width=width)
+    top.insert(1, _tabs("transfers"))
+    footer = _hints(TRANSFER_HINTS, message)
+    available = height - len(top) - len(details) - 2
+    if available < 3:
+        # Small popups drop the machine summary before the transfer list.
+        top = top[:2] + top[-1:]
+        available = max(height - len(top) - len(details) - 2, 1)
+    if not rows:
+        rows = [[("   nothing here yet", "dim")]]
+    first = min(max(selected - available + 1, 0), max(len(rows) - available, 0))
+    visible = rows[first : first + available]
+    if first > 0:
+        top[-1] = top[-1] + [(f"   {GLYPHS['up']} {first} more", "dim")]
+    hidden_below = len(rows) - first - len(visible)
+    filler: list[Line] = [[] for _ in range(max(available - len(visible), 0))]
+    below: Line = [(f"   {GLYPHS['down']} {hidden_below} more", "dim")] if hidden_below > 0 else []
+    return (top + visible + [below] + details + filler + [footer])[: max(height, 0)]
+
+
+def opener_items(settings: Mapping[str, object]) -> int:
+    rules = settings.get("rules")
+    return (len(rules) if isinstance(rules, list) else 0) + len(SETTING_ROWS)
+
+
+def render_openers_view(
+    settings_state: Mapping[str, object] | None, *, title: str, selected: int, width: int, height: int,
+    message: str | None = None,
+) -> list[Line]:
+    lines: list[Line] = [_header(title, "openers", width), _tabs("openers"), []]
+    lines.append([(" OPENERS ", "label"), ("  how remote files open when you press o; first matching rule wins", "dim")])
+    if not settings_state or not isinstance(settings_state.get("settings"), Mapping):
+        error = settings_state.get("error") if settings_state else None
+        lines += [[], [("   " + _optional_text(error, "loading settings…"), "warn")]]
+        return (lines + [[] for _ in range(max(height - len(lines) - 1, 0))] + [_hints([("tab", "transfers"), ("q", "quit")], message)])[:height]
+    settings = settings_state["settings"]
+    rules = [rule for rule in settings.get("rules", []) if isinstance(rule, Mapping)]  # type: ignore[union-attr]
+    allowed = settings_state.get("preview_suffixes")
+    if settings_state.get("error"):
+        lines.append([("   " + _clip(settings_state.get("error"), width - 4), "warn")])
+    lines.append([])
+
+    def row(index: int, name: str, value: str, style: str = "", note: str = "") -> Line:
+        chosen = index == selected
+        value_text = f"{GLYPHS['left']} {value} {GLYPHS['right']}" if chosen else f"  {value}  "
+        line: Line = [(f" {GLYPHS['select'] if chosen else ' '} ", "accent bold"), (_clip(name, 28).ljust(30), ""),
+                      (value_text, style or "accent"), (f"  {note}" if note else "", "warn")]
+        return [(text, "sel") for text, _style in _pad(line, width - 1)] if chosen else line
+
+    pattern_width = 30
+    for index, rule in enumerate(rules):
+        opener = str(rule.get("opener"))
+        pattern = sanitize_terminal_text(rule.get("pattern"))
+        note = ""
+        suffix = ("." + pattern.rsplit(".", 1)[-1].lower()) if "." in pattern.rsplit("/", 1)[-1] else ""
+        if opener == "preview" and isinstance(allowed, list) and suffix and suffix not in allowed:
+            note = f"preview blocked for {suffix}; will fail"
+        lines.append(row(index, f"{index + 1:>2}  {_clip(pattern, pattern_width - 4)}", OPENER_LABELS.get(opener, opener),
+                         {"preview": "good", "download": "info"}.get(opener, "accent"), note))
+    lines.append([("    ", ""), ("*  everything else".ljust(30), "dim"), ("  VS Code", "dim")])
+    if not rules:
+        lines.append([("    press a to add a rule such as *.pdf (preview) or *.pt (download)", "dim")])
+    lines += [[], [(" WINDOWS & VIEWERS ", "label")]]
+    for offset, (key, name, _choices) in enumerate(SETTING_ROWS):
+        lines.append(row(len(rules) + offset, f"    {name}", _optional_text(settings.get(key))))
+    lines += [[], [(f"   saved to {_optional_text(settings_state.get('path'))}", "faint")],
+              [("   Preview copies the file here and opens it locally; Download saves it to Downloads.", "faint")]]
+    lines = lines[: max(height - 1, 0)]
+    return lines + [[] for _ in range(max(height - len(lines) - 1, 0))] + [_hints(OPENER_HINTS, message)]
+
+
+def _styles() -> dict[str, int]:
+    names = ("info", "good", "warn", "bad", "accent", "header", "brand", "label", "key", "tab-on", "dim", "faint", "bold", "sel")
+    styles = dict.fromkeys(names, 0)
+    styles.update(bold=curses.A_BOLD, dim=curses.A_DIM, faint=curses.A_DIM, sel=curses.A_REVERSE,
+                  label=curses.A_BOLD | curses.A_DIM, key=curses.A_BOLD, header=curses.A_REVERSE,
+                  brand=curses.A_REVERSE | curses.A_BOLD, **{"tab-on": curses.A_REVERSE | curses.A_BOLD})
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        for pair, (name, color) in enumerate((("info", curses.COLOR_CYAN), ("good", curses.COLOR_GREEN),
+                                              ("warn", curses.COLOR_YELLOW), ("bad", curses.COLOR_RED),
+                                              ("accent", curses.COLOR_MAGENTA)), start=1):
+            curses.init_pair(pair, color, -1)
+            styles[name] = curses.color_pair(pair)
+        curses.init_pair(6, curses.COLOR_WHITE, curses.COLOR_BLUE)
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        styles.update(header=curses.color_pair(6), brand=curses.color_pair(7) | curses.A_BOLD,
+                      key=curses.color_pair(5) | curses.A_BOLD, **{"tab-on": curses.color_pair(6) | curses.A_BOLD})
+        if curses.COLORS >= 16:
+            curses.init_pair(8, 8, -1)  # bright black renders more reliably than A_DIM
+            styles["faint"] = curses.color_pair(8)
+    except (curses.error, ValueError):
+        pass
+    return styles
+
+
+def draw(screen: Any, lines: list[Line], styles: Mapping[str, int]) -> None:
     height, width = screen.getmaxyx()
-    lines = ["tmux-opener host dashboard", "", f"ERROR: {sanitize_terminal_text(message)}", "", "Press q to quit; any key retries the bridge."]
     screen.erase()
     for row, line in enumerate(lines[: max(height, 0)]):
-        if row >= height:
-            break
+        column = 0
+        for text, style in line:
+            room = width - 1 - column
+            if room <= 0:
+                break
+            attr = 0
+            for name in style.split():
+                attr |= styles.get(name, 0)
+            try:
+                screen.addnstr(row, column, text, room, attr)
+            except curses.error:
+                pass
+            column += min(len(text), room)
+    screen.refresh()
+
+
+def _display_error(screen: Any, message: str, styles: Mapping[str, int] | None = None) -> None:
+    _height, width = screen.getmaxyx()
+    lines = [_header("host dashboard", "", width), [],
+             [("  ERROR: ", "bad bold"), (sanitize_terminal_text(message), "bad")], [],
+             [("  The desktop client did not answer. ", "dim")],
+             _hints([("q", "quit"), ("any key", "retry")])]
+    draw(screen, lines, styles or {})
+
+
+def _local_settings_module():
+    package_root = Path(__file__).resolve().parents[1]
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+    try:
+        from lib import tmux_opener_settings
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise StatusError("local settings support is unavailable") from exc
+    return tmux_opener_settings
+
+
+def request_settings(socket_path: str | None, timeout: float, local: bool) -> dict[str, object]:
+    """Read opener settings from the desktop (local mode) or its client."""
+
+    if local:
+        module = _local_settings_module()
+        settings, error = module.load()
+        return {"settings": settings, "error": error, "path": str(module.settings_path()),
+                "preview_suffixes": sorted(module.PREVIEW_SUFFIXES)}
+    response = send_request(socket_path or default_socket_path(), {"version": 1, "action": "get_settings"}, timeout)
+    if response.get("ok") is not True:
+        raise _status_error(response)
+    if not isinstance(response.get("settings"), Mapping):
+        raise StatusError("this desktop client predates opener settings; restart it with a newer tmux-opener")
+    return dict(response)
+
+
+def save_settings(settings: Mapping[str, object], socket_path: str | None, timeout: float, local: bool) -> None:
+    if local:
         try:
-            screen.addnstr(row, 0, line, max(width - 1, 1))
+            _local_settings_module().save(dict(settings))
+        except ValueError as exc:
+            raise StatusError(str(exc)) from exc
+        return
+    response = send_request(socket_path or default_socket_path(), {"version": 1, "action": "set_settings", "settings": settings}, timeout)
+    if response.get("ok") is not True:
+        raise _status_error(response)
+
+
+def _prompt(screen: Any, label: str) -> str:
+    """Read one line at the bottom of the screen; empty input cancels."""
+
+    height, width = screen.getmaxyx()
+    screen.timeout(-1)
+    try:
+        curses.echo()
+        curses.curs_set(1)
+    except curses.error:
+        pass
+    try:
+        screen.move(height - 1, 0)
+        screen.clrtoeol()
+        screen.addnstr(height - 1, 0, label, max(width - 1, 1), curses.A_BOLD)
+        raw = screen.getstr(height - 1, min(len(label), width - 2), 256)
+    except curses.error:
+        raw = b""
+    finally:
+        try:
+            curses.noecho()
+            curses.curs_set(0)
         except curses.error:
             pass
-    screen.refresh()
+        screen.timeout(100)
+    return sanitize_terminal_text(raw.decode("utf-8", "replace")).strip()
+
+
+def edit_settings(settings: dict[str, object], selected: int, key: int, screen: Any) -> tuple[bool, int]:
+    """Apply one opener-view key to settings; return (changed, selection)."""
+
+    rules = settings.get("rules")
+    if not isinstance(rules, list):
+        rules = settings["rules"] = []
+    on_rule = selected < len(rules)
+    if key in (curses.KEY_RIGHT, curses.KEY_LEFT, ord("l"), ord("h"), ord(" "), 10, 13, curses.KEY_ENTER):
+        step = -1 if key in (curses.KEY_LEFT, ord("h")) else 1
+        if on_rule:
+            choices = tuple(OPENER_LABELS)
+            rule = rules[selected]
+            rule["opener"] = choices[(choices.index(rule["opener"]) + step) % len(choices)] if rule["opener"] in choices else choices[0]
+        else:
+            name, _label_text, choices = SETTING_ROWS[selected - len(rules)]
+            current = settings.get(name)
+            settings[name] = choices[(choices.index(current) + step) % len(choices)] if current in choices else choices[0]
+        return True, selected
+    if key == ord("a"):
+        pattern = _prompt(screen, " New rule pattern (e.g. *.pdf, */figures/*.png): ")
+        if not pattern:
+            return False, selected
+        rules.append({"pattern": pattern, "opener": "preview"})
+        return True, len(rules) - 1
+    if key in (ord("x"), ord("d"), curses.KEY_DC) and on_rule:
+        rules.pop(selected)
+        return True, min(selected, max(len(rules) - 1, 0))
+    if key in (ord("J"), ord("K")) and on_rule:
+        target = selected + (1 if key == ord("J") else -1)
+        if 0 <= target < len(rules):
+            rules[selected], rules[target] = rules[target], rules[selected]
+            return True, target
+    return False, selected
 
 
 def run_live_dashboard(
@@ -522,13 +824,29 @@ def run_live_dashboard(
     initial_snapshot: dict[str, object] | None = None,
 ) -> None:
     screen.timeout(100)
+    styles = _styles()
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
     snapshot: dict[str, object] | None = initial_snapshot
+    view = "transfers"
     selected = 0
     selected_id: object = None
+    opener_selected = 0
+    settings_state: dict[str, object] | None = None
     error: str | None = None
     message: str | None = None
     force_refresh = initial_snapshot is None
     next_refresh = time.monotonic() + REFRESH_SECONDS if initial_snapshot is not None else 0.0
+    title = "desktop dashboard" if local else "host dashboard"
+
+    def load_settings() -> dict[str, object]:
+        try:
+            return request_settings(socket_path, timeout, local)
+        except (OSError, ValueError, StatusError) as exc:
+            return {"error": sanitize_terminal_text(exc) or "settings unavailable"}
+
     while True:
         now = time.monotonic()
         if force_refresh or now >= next_refresh:
@@ -540,86 +858,90 @@ def run_live_dashboard(
                     if local
                     else request_status(socket_path, cwd=cwd, pane=pane, ssh_host=ssh_host, timeout=timeout)
                 )
-                downloads = _download_rows(latest.get("downloads", [])) if isinstance(latest.get("downloads"), list) else []
+                downloads = snapshot_downloads(latest)
                 if selected_id is not None:
                     selected = next((i for i, item in enumerate(downloads) if item.get("id") == selected_id), min(selected, max(len(downloads) - 1, 0)))
                 selected = min(selected, max(len(downloads) - 1, 0))
                 selected_id = downloads[selected].get("id") if downloads else None
                 snapshot = latest
                 error = None
-                message = None
             except (OSError, ValueError, StatusError) as exc:
                 error = sanitize_terminal_text(exc) or "bridge unavailable"
 
+        height, width = screen.getmaxyx()
         if error:
-            _display_error(screen, error)
+            _display_error(screen, error, styles)
+        elif view == "openers":
+            draw(screen, render_openers_view(settings_state, title=title, selected=opener_selected, width=width,
+                                             height=height, message=message), styles)
         elif snapshot is not None:
-            height, width = screen.getmaxyx()
-            footer = f"{message} | q quit" if message else None
-            lines = render_curses_lines(
-                snapshot,
-                ssh_host=ssh_host,
-                pane=pane,
-                selected=selected,
-                width=width,
-                height=height,
-                footer=footer,
-            )
-            screen.erase()
-            for row, line in enumerate(lines[: max(height, 0)]):
-                try:
-                    screen.addnstr(row, 0, line, max(width - 1, 1))
-                except curses.error:
-                    pass
-            if message and height:
-                try:
-                    screen.addnstr(height - 1, 0, sanitize_terminal_text(message), max(width - 1, 1))
-                except curses.error:
-                    pass
-            screen.refresh()
+            lines = render_transfers_view(snapshot, ssh_host=ssh_host, pane=pane, selected=selected, width=width,
+                                          height=height, message=message)
+            lines[0] = _header(title, f"{ssh_host + '  ' if ssh_host else ''}{time.strftime('%H:%M:%S')}", width)
+            draw(screen, lines, styles)
 
         key = screen.getch()
         if key < 0:
             continue
-        if key in (ord("q"), ord("Q")):
+        if key in (ord("q"), ord("Q"), 27):
             return
         if error:
             # Any key is an explicit recovery attempt while the bridge error
             # remains visible; q above is the only exit path.
             force_refresh = True
             continue
-        downloads = _download_rows(snapshot.get("downloads", [])) if snapshot and isinstance(snapshot.get("downloads"), list) else []
+        message = None
+        if key == 9:  # tab
+            view = "openers" if view == "transfers" else "transfers"
+            if view == "openers":
+                settings_state = load_settings()
+            continue
+        if view == "openers":
+            settings = settings_state.get("settings") if settings_state else None
+            if not isinstance(settings, Mapping):
+                settings_state = load_settings()
+                continue
+            count = opener_items(settings)
+            if key in (curses.KEY_UP, ord("k")):
+                opener_selected = (opener_selected - 1) % count
+            elif key in (curses.KEY_DOWN, ord("j")):
+                opener_selected = (opener_selected + 1) % count
+            else:
+                edited = json.loads(json.dumps(settings))
+                changed, opener_selected = edit_settings(edited, opener_selected, key, screen)
+                if changed:
+                    try:
+                        save_settings(edited, socket_path, timeout, local)
+                        message = "saved"
+                    except (OSError, ValueError, StatusError) as exc:
+                        message = f"not saved: {sanitize_terminal_text(exc)}"
+                    settings_state = load_settings()
+            opener_selected = min(opener_selected, max(opener_items(settings_state.get("settings") or {}) - 1, 0))
+            continue
+        downloads = snapshot_downloads(snapshot)
         if key in (curses.KEY_UP, ord("k")) and downloads:
             selected = (selected - 1) % len(downloads)
             selected_id = downloads[selected].get("id")
         elif key in (curses.KEY_DOWN, ord("j")) and downloads:
             selected = (selected + 1) % len(downloads)
             selected_id = downloads[selected].get("id")
-        elif key in (ord("c"), ord("C")) and downloads:
+        elif key in (ord("c"), ord("C"), ord("r"), ord("R")) and downloads:
             download = downloads[selected]
+            action = "cancel_download" if key in (ord("c"), ord("C")) else "retry_download"
+            if action == "retry_download" and str(download.get("state", "")) not in RETRY_STATES:
+                force_refresh = True
+                continue
             try:
                 if local:
-                    request_local_action(download, "cancel_download", timeout)
+                    request_local_action(download, action, timeout)
                 else:
-                    request_action(socket_path or default_socket_path(), "cancel_download", download.get("id"), timeout, ssh_host)
-                message = f"cancel requested for {_optional_text(download.get('id'))}"
+                    request_action(socket_path or default_socket_path(), action, download.get("id"), timeout, ssh_host)
+                message = f"{action.split('_')[0]} requested for {_basename(download.get('path'))}"
                 force_refresh = True
             except (OSError, ValueError, StatusError) as exc:
                 error = sanitize_terminal_text(exc) or "bridge unavailable"
-        elif key in (ord("r"), ord("R")):
-            if downloads and str(downloads[selected].get("state", "")) in RETRY_STATES:
-                download = downloads[selected]
-                try:
-                    if local:
-                        request_local_action(download, "retry_download", timeout)
-                    else:
-                        request_action(socket_path or default_socket_path(), "retry_download", download.get("id"), timeout, ssh_host)
-                    message = f"retry requested for {_optional_text(download.get('id'))}"
-                    force_refresh = True
-                except (OSError, ValueError, StatusError) as exc:
-                    error = sanitize_terminal_text(exc) or "bridge unavailable"
-            else:
-                force_refresh = True
+        else:
+            force_refresh = True
 
 
 def _json_error(message: object) -> dict[str, object]:

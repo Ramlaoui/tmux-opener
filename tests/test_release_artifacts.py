@@ -122,6 +122,7 @@ def test_python_entrypoints_compile() -> None:
         "scripts/tmux_opener_common.py",
         "lib/tmux_opener_downloads.py",
         "lib/tmux_opener_dashboard.py",
+        "lib/tmux_opener_settings.py",
     ]:
         compile_script(relative_path)
 
@@ -232,6 +233,7 @@ def test_client_archive_contents(tmp_path: Path) -> None:
         "tmux-opener-client/bin/tmux-opener-client",
         "tmux-opener-client/lib",
         "tmux-opener-client/lib/tmux_opener_downloads.py",
+        "tmux-opener-client/lib/tmux_opener_settings.py",
         "tmux-opener-client/lib/tmux_opener_dashboard.py",
         "tmux-opener-client/lib/dashboard.html",
         "tmux-opener-client/scripts",

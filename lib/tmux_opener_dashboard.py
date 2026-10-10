@@ -21,6 +21,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+try:
+    from . import tmux_opener_settings as opener_settings
+except ImportError:  # loaded as a top-level module from lib/
+    import tmux_opener_settings as opener_settings
+
 
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_ACTION_BYTES = 64 * 1024
@@ -366,11 +371,20 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _settings_payload(self) -> dict[str, object]:
+        settings, error = opener_settings.load()
+        return {"ok": True, "settings": settings, "error": error, "path": str(opener_settings.settings_path()),
+                "preview_suffixes": sorted(opener_settings.PREVIEW_SUFFIXES)}
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         if not self._host_is_local():
             self._send_error_json(HTTPStatus.MISDIRECTED_REQUEST, "request host is not allowed")
             return
         route = urllib.parse.urlsplit(self.path)
+        if route.path == "/api/settings":
+            if self._api_guard():
+                self._send_json(self._settings_payload())
+            return
         if route.path == "/api/status":
             if not self._api_guard():
                 return
@@ -423,13 +437,24 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.MISDIRECTED_REQUEST, "request host is not allowed")
             return
         route = urllib.parse.urlsplit(self.path)
-        if route.path != "/api/action":
+        if route.path not in {"/api/action", "/api/settings"}:
             self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
             return
         if not self._api_guard(require_origin=True):
             return
         payload = self._read_action()
         if payload is None:
+            return
+        if route.path == "/api/settings":
+            try:
+                opener_settings.save(payload.get("settings"))
+            except ValueError as exc:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            except OSError:
+                self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "settings could not be saved")
+                return
+            self._send_json(self._settings_payload())
             return
         if set(payload) != {"socket", "action", "download_id"}:
             self._send_error_json(HTTPStatus.BAD_REQUEST, "unsupported action fields")
