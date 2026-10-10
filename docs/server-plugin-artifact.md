@@ -6,6 +6,7 @@ This archive contains only the remote tmux side of tmux-opener:
 - `scripts/tmux-opener-dispatch`
 - `scripts/tmux-opener-pick`
 - `scripts/tmux-opener-send`
+- `scripts/tmux-opener-status`
 - `scripts/tmux_opener_common.py`
 - `integration/vimtex.lua`
 
@@ -17,6 +18,49 @@ In copy mode, select file paths and press `d` to download to the client Download
 folder, or `D` to open a save dialog on the client. Both require an updated Local
 Opener Client and an available bridge. Several paths can be selected, one per
 line or space-separated (quote filenames containing spaces).
+
+## Host dashboard
+
+Press the tmux prefix followed by `O` to open the host dashboard. It reports
+the local client machine, the most recent host metadata reported by the current
+terminal, and client mediated file transfers. The host activity label means
+that a terminal recently reported metadata; it does not claim that an SSH
+connection is currently active.
+
+The dashboard uses the version 1 `get_status` request and the same forwarded
+Unix socket as the other plugin commands. It refreshes about once per second.
+Use the arrow keys (or `j`/`k`) to select a transfer, `c` to request
+cancellation, `r` to retry a failed, cancelled, or interrupted transfer, and
+`q` to close the popup. The `--once` and `--json` modes are available for
+noninteractive checks:
+
+```sh
+scripts/tmux-opener-status --once
+scripts/tmux-opener-status --json
+scripts/tmux-opener-status --local --once
+```
+
+The request carries the source pane's `TMUX_PANE`, current working directory,
+hostname, user, and operating system. Configure the dashboard key or the
+socket and SSH host in tmux as usual:
+
+```tmux
+set -g @tmux_opener_dashboard_key 'O'
+set -g @tmux_opener_socket '/tmp/tmux-opener-myuser.sock'
+set -g @tmux_opener_ssh_host 'cluster'
+```
+
+The dashboard requires a client that implements the status contract. An older
+client is reported as unsupported in the dashboard and does not make the
+popup disappear; bridge failures remain visible until the bridge recovers or
+the user quits.
+
+Install the same plugin in the desktop tmux session to use the prefix `O`
+there as well. The desktop entrypoint runs the local aggregation mode over
+all configured client sockets (`~/.local/state/tmux-opener` and
+`~/.ssh/tmux-opener.d`); it includes reachable and offline aliases and routes
+transfer actions back to the owning client. An interactive remote popup falls
+back to that desktop entrypoint when its forwarded bridge is unavailable.
 
 ## Install from archive
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import getpass
 import filecmp
 import hashlib
 import json
@@ -27,9 +28,12 @@ import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+from tmux_opener_downloads import DownloadQueue  # noqa: E402
 
 
 HOST_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
@@ -48,6 +52,9 @@ MAX_REQUEST_BYTES = 1024 * 1024
 MAX_CONNECTIONS = 32
 MAX_LAUNCHES = 32
 INSTANCE_ID = uuid.uuid4().hex
+STARTED_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
+LAST_REQUEST_AT: str | None = None
+HOST_ACTIVITY: dict[str, dict[str, object]] = {}
 LAUNCHED_PROCESSES: list[subprocess.Popen[bytes]] = []
 
 
@@ -95,7 +102,7 @@ def ping_response(args: argparse.Namespace) -> dict[str, object]:
         "version": 1,
         "instance_id": INSTANCE_ID,
         "client": "tmux-opener-client",
-        "capabilities": ["remote_pdf"],
+        "capabilities": ["remote_pdf", "download_status"],
         "pid": os.getpid(),
         "default_ssh_host": args.default_ssh_host,
         "allowed_ssh_hosts": sorted(args.allow_ssh_host),
@@ -705,7 +712,7 @@ def downloads_directory() -> Path:
     return Path.home() / "Downloads"
 
 
-def choose_download_path(default: Path) -> Path | None:
+def choose_download_path(default: Path, cancel: threading.Event | None = None) -> Path | None:
     system = platform.system()
     if system == "Darwin":
         command = [
@@ -726,7 +733,20 @@ def choose_download_path(default: Path) -> Path | None:
                    "from pathlib import Path; p=Path(sys.argv[1]); root=tk.Tk(); root.withdraw(); "
                    "print(filedialog.asksaveasfilename(title='Save remote file', "
                    "initialdir=str(p.parent), initialfile=p.name)); root.destroy()", str(default)]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if cancel is None:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    else:
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+            while True:
+                if cancel.is_set():
+                    terminate_process(process)
+                    return None
+                try:
+                    output, errors = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            result = subprocess.CompletedProcess(command, process.returncode, output, errors)
     if result.returncode:
         if result.returncode == 1 and system != "Darwin" and command[0] != sys.executable:
             return None
@@ -755,35 +775,67 @@ def download_notification(message: str) -> None:
 def download_file(
     host: str, path: str, ask_destination: bool, ssh: str,
     ssh_config: str | None = None, verbose: bool = False,
-) -> None:
+    progress=None, cancel: threading.Event | None = None,
+) -> dict[str, object]:
     temporary: Path | None = None
+    received = 0
+    process = None
     try:
+        if cancel is not None and cancel.is_set():
+            return {"state": "cancelled"}
         directory = downloads_directory()
         directory.mkdir(parents=True, exist_ok=True)
         destination = directory / Path(path).name
         if ask_destination:
-            with SAVE_DIALOG_LOCK:
-                destination = choose_download_path(destination)
+            while not SAVE_DIALOG_LOCK.acquire(timeout=0.2):
+                if cancel is not None and cancel.is_set():
+                    return {"state": "cancelled"}
+            try:
+                destination = choose_download_path(destination, cancel) if cancel is not None else choose_download_path(destination)
+            finally:
+                SAVE_DIALOG_LOCK.release()
             if destination is None:
                 log_line(f"download cancelled: {host}:{path}" if verbose else "download cancelled")
-                return
+                return {"state": "cancelled"}
             if destination.exists():
                 raise RequestError(f"destination already exists; choose a new filename: {destination}")
 
         command = remote_file_command(host, path, ssh, ssh_config)
         log_line(f"download started: {host}:{path} -> {destination}" if verbose else "download started")
+        if progress is not None:
+            progress(state="downloading", destination=str(destination))
         with tempfile.NamedTemporaryFile(prefix=".tmux-opener-", suffix=".part",
                                          dir=destination.parent, delete=False) as output:
             temporary = Path(output.name)
             with tempfile.TemporaryFile() as errors:
-                result = subprocess.run(command, stdout=output, stderr=errors,
-                                        stdin=subprocess.DEVNULL, check=False)
-                if result.returncode:
-                    raise RequestError(f"SSH exited {result.returncode}{stderr_suffix(errors)}")
+                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, stdin=subprocess.DEVNULL)
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    eof = False
+                    while not eof or process.poll() is None:
+                        if cancel is not None and cancel.is_set():
+                            terminate_process(process)
+                            return {"state": "cancelled", "bytes_received": received}
+                        for _key, _events in selector.select(timeout=0.2):
+                            chunk = os.read(process.stdout.fileno(), 256 * 1024)
+                            if not chunk:
+                                eof = True
+                                selector.unregister(process.stdout)
+                                break
+                            output.write(chunk)
+                            received += len(chunk)
+                            if progress is not None:
+                                progress(bytes_received=received)
+                process.stdout.close()
+                if process.returncode:
+                    detail = stderr_suffix(errors) if verbose else ""
+                    raise RequestError(f"SSH exited {process.returncode}{detail}")
 
         original = destination
         index = 0
         while True:
+            if cancel is not None and cancel.is_set():
+                return {"state": "cancelled", "bytes_received": received}
             try:
                 # Atomic publication without overwriting a file created by another download.
                 os.link(temporary, destination)
@@ -797,23 +849,85 @@ def download_file(
         if verbose:
             log_line(message)
         download_notification(message)
+        return {"state": "completed", "destination": str(destination), "bytes_received": received, "error": None}
     except (OSError, RequestError) as exc:
         message = f"Download failed for {host}:{path}: {exc}"
         if verbose:
             log_line(message)
         download_notification(message)
+        return {"state": "failed", "bytes_received": received, "error": str(exc)[:2000]}
     finally:
+        if process is not None:
+            if process.poll() is None:
+                terminate_process(process)
+            if process.stdout is not None:
+                process.stdout.close()
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
 
-def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
+def observe_host(request: dict[str, object], args: argparse.Namespace) -> None:
+    global LAST_REQUEST_AT
+    LAST_REQUEST_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    info = request.get("host_info")
+    if not isinstance(info, dict):
+        return
+    host = request.get("ssh_host") or args.default_ssh_host
+    if not isinstance(host, str) or host not in args.allow_ssh_host and not args.allow_any_ssh_host:
+        return
+    metadata = {key: value[:1024] for key, value in info.items()
+                if key in {"hostname", "user", "os", "cwd", "pane"} and isinstance(value, str)}
+    HOST_ACTIVITY[host] = {"ssh_host": host, **metadata, "last_seen": LAST_REQUEST_AT}
+
+
+def status_response(request: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    host = request.get("ssh_host")
+    if host is not None:
+        host = validate_host(host, None if args.allow_any_ssh_host else set(args.allow_ssh_host))
+    downloads = args.download_queue.snapshot(host)
+    allowed = None if args.allow_any_ssh_host else set(args.allow_ssh_host)
+    downloads = [job for job in downloads if allowed is None or job["ssh_host"] in allowed]
+    return {
+        "client_info": {"hostname": platform.node(), "user": getpass.getuser(), "os": platform.system(),
+                        "pid": os.getpid(), "instance_id": INSTANCE_ID, "default_ssh_host": args.default_ssh_host,
+                        "started_at": STARTED_AT, "last_request_at": LAST_REQUEST_AT},
+        "hosts": [dict(value) for key, value in HOST_ACTIVITY.items()
+                  if (host is None or key == host) and (allowed is None or key in allowed)],
+        "downloads": downloads,
+        "history_error": args.download_queue.storage_error,
+        "remote_localhost_forwards": active_remote_localhost_forwards(),
+    }
+
+
+def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, object] | None:
     action = request.get("action")
     if args.verbose:
         log_line(f"request: {json.dumps(request, sort_keys=True)}")
 
     if action == "ping":
         return
+
+    observe_host(request, args)
+    if action == "get_status":
+        return status_response(request, args)
+    if action in {"cancel_download", "retry_download"}:
+        identifier = request.get("download_id")
+        if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier):
+            raise RequestError("download_id must be a valid download identifier")
+        job = next((value for value in args.download_queue.snapshot() if value["id"] == identifier), None)
+        if job is None:
+            raise RequestError("download was not found")
+        host = validate_host(job["ssh_host"], None if args.allow_any_ssh_host else set(args.allow_ssh_host))
+        if request.get("ssh_host") is not None and request["ssh_host"] != host:
+            raise RequestError("download was not found for this host")
+        try:
+            if action == "cancel_download":
+                result = args.download_queue.cancel(identifier, host)
+            else:
+                result = args.download_queue.retry(identifier, host)
+        except (ValueError, OSError) as exc:
+            raise RequestError("download queue action failed") from exc
+        return {"download_id": result["id"], "state": result["state"]}
 
     if action in ("open_url", "open_vscode_remote", "open_remote_localhost", "open_remote_pdf", "download_file"):
         log_line(f"request action={action}")
@@ -862,11 +976,14 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
             return
         host = validate_host(request.get("ssh_host"), allowed_hosts)
         path = validate_path(request.get("path"))
-        if Path(path).name in ("", ".", "..") or any(character in path for character in "\r\n"):
+        if len(path) > 4096 or Path(path).name in ("", ".", "..") or any(character in path for character in "\r\n"):
             raise RequestError("download path must name a file and contain no newlines")
         ask_destination = request.get("ask_destination", False)
         if not isinstance(ask_destination, bool):
             raise RequestError("ask_destination must be a boolean")
+        size_bytes = request.get("size_bytes")
+        if size_bytes is not None and (type(size_bytes) is not int or not 0 <= size_bytes <= 2**63 - 1):
+            raise RequestError("size_bytes must be a non-negative integer")
         ssh = shutil.which("ssh")
         if not ssh:
             raise RequestError("ssh is not installed on the client")
@@ -874,8 +991,11 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
             message = f"dry-run download: {host}:{path} -> {'client save dialog' if ask_destination else downloads_directory()}"
             log_line(message if args.verbose else "dry-run download")
             return
-        threading.Thread(target=download_file, args=(host, path, ask_destination, ssh, args.ssh_config, args.verbose)).start()
-        return
+        try:
+            job = args.download_queue.submit(host, path, ask_destination, size_bytes)
+        except (ValueError, OSError) as exc:
+            raise RequestError("download queue could not accept this transfer") from exc
+        return {"download_id": job["id"], "state": "queued"}
 
     raise RequestError("unsupported action")
 
@@ -1022,8 +1142,8 @@ def serve(server: socket.socket, args: argparse.Namespace, stop: threading.Event
             if stop.is_set() or finished.is_set():
                 break
             try:
-                dispatch(request, args)
-                response: dict[str, object] = {"ok": True}
+                result = dispatch(request, args)
+                response: dict[str, object] = {"ok": True, **(result or {})}
             except RequestError as exc:
                 log_line(f"reject: {exc}")
                 response = {"ok": False, "error": str(exc)}
@@ -1147,6 +1267,17 @@ def main() -> int:
 
     server = bind_server(args.socket)
     stop = threading.Event()
+    try:
+        args.download_queue = DownloadQueue(
+            Path(args.socket).expanduser().with_suffix(".downloads.json"),
+            lambda job, update, cancel: download_file(
+                job["ssh_host"], job["path"], job["ask_destination"], shutil.which("ssh") or "ssh",
+                args.ssh_config, args.verbose, progress=update, cancel=cancel,
+            ),
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        server.cleanup()
+        raise SystemExit("tmux-opener: cannot load download history; inspect the client state directory")
 
     def handle_signal(_signum: int, _frame: object) -> None:
         stop.set()
@@ -1158,6 +1289,7 @@ def main() -> int:
     try:
         serve(server, args, stop)
     finally:
+        args.download_queue.close()
         stop_remote_localhost_forwards()
         server.cleanup()
 

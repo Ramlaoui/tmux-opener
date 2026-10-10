@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""Show and control the local tmux-opener client's host and transfers."""
+
+from __future__ import annotations
+
+import argparse
+import curses
+import getpass
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import time
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from tmux_opener_common import default_socket_path, send_request
+
+
+STATUS_STATES = {
+    "queued",
+    "choosing_destination",
+    "downloading",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+}
+RETRY_STATES = {"failed", "cancelled", "interrupted"}
+DEFAULT_TIMEOUT = 3.0
+REFRESH_SECONDS = 1.0
+DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "tmux-opener"
+DEFAULT_SNIPPET_DIR = Path.home() / ".ssh" / "tmux-opener.d"
+
+
+class StatusError(RuntimeError):
+    """A status request was rejected or did not return the status contract."""
+
+
+def sanitize_terminal_text(value: object) -> str:
+    """Return text safe to put directly into a terminal cell.
+
+    JSON escaping protects --json output. This helper is for the text and
+    curses views, where control characters supplied by a filename or error
+    message must never be interpreted by the terminal.
+    """
+
+    text = "" if value is None else str(value)
+    return "".join(
+        character
+        for character in text
+        if not (ord(character) < 0x20 or 0x7F <= ord(character) <= 0x9F)
+    )
+
+
+def _optional_text(value: object, fallback: str = "-") -> str:
+    text = sanitize_terminal_text(value)
+    return text if text else fallback
+
+
+def build_status_request(cwd: str, pane: str | None = None, ssh_host: str | None = None) -> dict[str, object]:
+    """Build the version 1 status request sent over the forwarded socket."""
+
+    request: dict[str, object] = {
+        "version": 1,
+        "action": "get_status",
+        "host_info": {
+            "hostname": platform.node(),
+            "user": getpass.getuser(),
+            "os": platform.system(),
+            "cwd": cwd,
+            "pane": pane if pane is not None else os.environ.get("TMUX_PANE"),
+        },
+    }
+    if ssh_host:
+        request["ssh_host"] = ssh_host
+    return request
+
+
+def build_action_request(action: str, download_id: object, ssh_host: str | None = None) -> dict[str, object]:
+    if action not in {"cancel_download", "retry_download"}:
+        raise ValueError(f"unsupported dashboard action: {action}")
+    request: dict[str, object] = {"version": 1, "action": action, "download_id": download_id}
+    if ssh_host:
+        request["ssh_host"] = ssh_host
+    return request
+
+
+def _status_error(response: Mapping[str, object]) -> StatusError:
+    error = sanitize_terminal_text(response.get("error"))
+    if error:
+        if "unknown action" in error.lower() or "unsupported" in error.lower():
+            return StatusError(f"old client unsupported: {error}")
+        return StatusError(error)
+    return StatusError("client rejected get_status")
+
+
+def validate_status_response(response: Mapping[str, object]) -> dict[str, object]:
+    """Validate the response shape while tolerating empty optional lists."""
+
+    if response.get("ok") is not True:
+        raise _status_error(response)
+    # Existing clients acknowledge unknown actions with {ok: true}. Requiring
+    # these fields makes that case visible instead of showing a blank dashboard.
+    if not isinstance(response.get("client_info"), Mapping) or not isinstance(response.get("downloads"), list):
+        raise StatusError("old client unsupported: get_status is unavailable")
+
+    result = dict(response)
+    if not isinstance(result.get("hosts"), list):
+        result["hosts"] = []
+    if not isinstance(result.get("remote_localhost_forwards"), list):
+        result["remote_localhost_forwards"] = []
+    return result
+
+
+def request_status(
+    socket_path: str | None = None,
+    *,
+    cwd: str | None = None,
+    pane: str | None = None,
+    ssh_host: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> dict[str, object]:
+    request = build_status_request(
+        cwd if cwd is not None else os.environ.get("TMUX_OPENER_CWD") or os.getcwd(),
+        pane,
+        ssh_host,
+    )
+    response = send_request(socket_path or default_socket_path(), request, timeout)
+    return validate_status_response(response)
+
+
+def _local_dashboard_api():
+    """Load desktop aggregation helpers only for explicit local mode."""
+
+    package_root = Path(__file__).resolve().parents[1]
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+    try:
+        from lib.tmux_opener_dashboard import client_request, collect_status
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise StatusError("local dashboard support is unavailable") from exc
+    return client_request, collect_status
+
+
+def request_local_status(
+    state_dir: str | os.PathLike[str] = DEFAULT_STATE_DIR,
+    snippet_dir: str | os.PathLike[str] = DEFAULT_SNIPPET_DIR,
+    *,
+    ssh_host: str | None = None,
+    socket_path: str | os.PathLike[str] | None = None,
+) -> dict[str, object]:
+    """Aggregate configured desktop clients into the dashboard response shape."""
+
+    _client_request, collect_status = _local_dashboard_api()
+    raw = collect_status(
+        Path(state_dir).expanduser(),
+        Path(snippet_dir).expanduser(),
+        host=ssh_host,
+        socket_path=Path(socket_path).expanduser() if socket_path else None,
+    )
+    clients = raw.get("clients") if isinstance(raw, Mapping) else []
+    clients = clients if isinstance(clients, list) else []
+    hosts: list[object] = []
+    downloads: list[object] = []
+    forwards: list[object] = []
+    first_online_info: Mapping[str, object] | None = None
+    selected_client: object = None
+    for client in clients:
+        if not isinstance(client, Mapping):
+            continue
+        if client.get("online") is True and first_online_info is None:
+            selected_client = client.get("host")
+            info = client.get("client_info")
+            if isinstance(info, Mapping):
+                first_online_info = info
+        client_hosts = client.get("hosts")
+        if isinstance(client_hosts, list):
+            hosts.extend(host for host in client_hosts if isinstance(host, Mapping))
+        client_forwards = client.get("remote_localhost_forwards")
+        if isinstance(client_forwards, list):
+            forwards.extend(client_forwards)
+        client_downloads = client.get("downloads")
+        if isinstance(client_downloads, list):
+            for download in client_downloads:
+                if not isinstance(download, Mapping):
+                    continue
+                routed = dict(download)
+                routed["_socket"] = client.get("socket")
+                routed["_client_host"] = client.get("host")
+                downloads.append(routed)
+
+    return {
+        "ok": True,
+        "version": 1,
+        "client_info": dict(first_online_info or {}),
+        "clients": clients,
+        "selected_client": selected_client,
+        "hosts": hosts,
+        "downloads": downloads,
+        "remote_localhost_forwards": forwards,
+        "updated_at": raw.get("updated_at") if isinstance(raw, Mapping) else None,
+    }
+
+
+def request_local_action(download: Mapping[str, object], action: str, timeout: float) -> dict[str, object]:
+    """Route one local dashboard action through the client owning the row."""
+
+    client_request, _collect_status = _local_dashboard_api()
+    socket_path = download.get("_socket")
+    if not isinstance(socket_path, str) or not socket_path:
+        raise StatusError("local transfer has no owning client socket")
+    response = client_request(
+        Path(socket_path),
+        build_action_request(action, download.get("id"), str(download.get("ssh_host") or "") or None),
+        timeout,
+    )
+    if not isinstance(response, Mapping) or response.get("ok") is not True:
+        if isinstance(response, Mapping):
+            raise _status_error(response)
+        raise StatusError("local client returned an invalid action response")
+    return dict(response)
+
+
+def request_action(
+    socket_path: str,
+    action: str,
+    download_id: object,
+    timeout: float,
+    ssh_host: str | None = None,
+) -> dict[str, object]:
+    response = send_request(socket_path, build_action_request(action, download_id, ssh_host), timeout)
+    if response.get("ok") is not True:
+        raise _status_error(response)
+    return response
+
+
+def _number(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if number >= 0 else None
+
+
+def format_bytes(value: object) -> str:
+    number = _number(value)
+    if number is None:
+        return "-"
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    scaled = float(number)
+    unit = units[0]
+    for unit in units:
+        if scaled < 1024 or unit == units[-1]:
+            break
+        scaled /= 1024
+    if unit == "B":
+        return f"{number} B"
+    return f"{scaled:.1f} {unit}"
+
+
+def format_progress(download: Mapping[str, object]) -> str:
+    received = _number(download.get("bytes_received"))
+    size = _number(download.get("size_bytes"))
+    if size is not None and size > 0 and received is not None:
+        percent = min(100.0, max(0.0, received * 100.0 / size))
+        return f"{format_bytes(received)}/{format_bytes(size)} ({percent:.0f}%)"
+    if received is not None:
+        return format_bytes(received)
+    if size is not None and size > 0:
+        return f"-/{format_bytes(size)}"
+    return "unknown"
+
+
+def _download_rows(downloads: list[object]) -> list[Mapping[str, object]]:
+    return [item for item in downloads if isinstance(item, Mapping)]
+
+
+STATE_LABELS = {
+    "queued": "queued",
+    "choosing_destination": "choose",
+    "downloading": "down",
+    "completed": "done",
+    "failed": "failed",
+    "cancelled": "cancel",
+    "interrupted": "interr",
+}
+
+
+def compact_state(value: object) -> str:
+    state = sanitize_terminal_text(value)
+    return STATE_LABELS.get(state, state or "unknown")
+
+
+def _clip_field(value: object, width: int, *, align_right: bool = False) -> str:
+    text = _optional_text(value)
+    if len(text) > width:
+        text = text[: max(width - 1, 0)] + "…" if width > 0 else ""
+    return text.rjust(width) if align_right else text.ljust(width)
+
+
+def _basename(value: object) -> str:
+    path = sanitize_terminal_text(value)
+    if not path:
+        return "-"
+    return path.rstrip("/").rsplit("/", 1)[-1] or path
+
+
+def format_table_progress(download: Mapping[str, object]) -> str:
+    received = _number(download.get("bytes_received"))
+    size = _number(download.get("size_bytes"))
+    if size is not None and size > 0 and received is not None:
+        return f"{min(100, max(0, received * 100 // size))}%"
+    if received is not None:
+        return format_bytes(received)
+    return "?"
+
+
+def format_download_row(download: Mapping[str, object], selected: bool = False) -> str:
+    """Render one compact row; full paths and errors live in the detail block."""
+
+    marker = ">" if selected else " "
+    identifier = _clip_field(download.get("id"), 8)
+    host = _clip_field(download.get("ssh_host") or "local", 10)
+    state = _clip_field(compact_state(download.get("state")), 7)
+    progress = _clip_field(format_table_progress(download), 7, align_right=True)
+    return f"{marker} {identifier} {host} {state} {progress} {_basename(download.get('path'))}"
+
+
+def _current_host(snapshot: Mapping[str, object], ssh_host: str | None = None) -> Mapping[str, object] | None:
+    hosts = snapshot.get("hosts")
+    if not isinstance(hosts, list):
+        return None
+    candidates = [host for host in hosts if isinstance(host, Mapping)]
+    client = snapshot.get("client_info")
+    client = client if isinstance(client, Mapping) else {}
+    requested = ssh_host or _optional_text(client.get("default_ssh_host"))
+    if requested and requested != "-":
+        for host in candidates:
+            if str(host.get("ssh_host") or "") == requested:
+                return host
+    return candidates[0] if candidates else None
+
+
+def _snapshot_sections(
+    snapshot: Mapping[str, object],
+    *,
+    ssh_host: str | None = None,
+    pane: str | None = None,
+    selected: int = 0,
+) -> tuple[list[str], list[Mapping[str, object]], list[str]]:
+    client = snapshot.get("client_info")
+    client = client if isinstance(client, Mapping) else {}
+    default_host = _optional_text(client.get("default_ssh_host"))
+    client_name = _optional_text(client.get("hostname"))
+    client_user = _optional_text(client.get("user"))
+    client_os = _optional_text(client.get("os"))
+    client_pid = _optional_text(client.get("pid"))
+    local_clients = snapshot.get("clients")
+    if isinstance(local_clients, list):
+        lines = ["tmux-opener desktop dashboard", "Local clients:"]
+        for local_client in local_clients:
+            if not isinstance(local_client, Mapping):
+                continue
+            alias = _optional_text(local_client.get("host"), "(unnamed)")
+            if local_client.get("online") is True:
+                info = local_client.get("client_info")
+                info = info if isinstance(info, Mapping) else {}
+                lines.append(
+                    f"  {alias}: online {_optional_text(info.get('user'))}@{_optional_text(info.get('hostname'))}"
+                    f" OS={_optional_text(info.get('os'))} pid={_optional_text(info.get('pid'))}"
+                )
+            else:
+                lines.append(f"  {alias}: offline ({_optional_text(local_client.get('error'))})")
+        selected_alias = _optional_text(snapshot.get("selected_client"), "(none online)")
+        lines.extend(
+            [
+                f"Selected client: {selected_alias}",
+                f"  {client_user}@{client_name}  OS={client_os}  pid={client_pid}  default SSH={default_host}",
+                f"  started={_optional_text(client.get('started_at'))}  last request={_optional_text(client.get('last_request_at'))}",
+            ]
+        )
+    else:
+        lines = [
+            "tmux-opener host dashboard",
+            f"Client: {client_user}@{client_name}",
+            f"  OS={client_os}  pid={client_pid}  default SSH={default_host}",
+            f"  started={_optional_text(client.get('started_at'))}",
+            f"  last request={_optional_text(client.get('last_request_at'))}",
+        ]
+
+    host = _current_host(snapshot, ssh_host)
+    if host is None:
+        lines.extend(["Remote host report (recent terminal report; does not indicate active SSH)", "  no recent terminal host metadata"])
+    else:
+        alias = _optional_text(host.get("ssh_host"), "(no alias)")
+        lines.extend(
+            [
+                "Remote host report (recent terminal report; does not indicate active SSH)",
+                f"  Host: {alias}  machine={_optional_text(host.get('hostname'))}",
+                f"  OS={_optional_text(host.get('os'))}  user={_optional_text(host.get('user'))}  pane={_optional_text(host.get('pane') or pane)}",
+                f"  cwd={_optional_text(host.get('cwd'))}",
+                f"  last seen={_optional_text(host.get('last_seen'))}",
+            ]
+        )
+
+    lines.extend(["", "Transfers (arrows or j/k select; c cancel; r retry; q quit):", "  ID       HOST       STATE   PROGRESS FILE"])
+    downloads = _download_rows(snapshot.get("downloads", [])) if isinstance(snapshot.get("downloads"), list) else []
+    if not downloads:
+        lines.append("  (none)")
+
+    details: list[str] = []
+    if downloads:
+        selected = min(max(selected, 0), len(downloads) - 1)
+        download = downloads[selected]
+        details = [
+            "",
+            "Selected transfer:",
+            f"  id={_optional_text(download.get('id'))}  host={_optional_text(download.get('ssh_host'), 'local')}  state={_optional_text(download.get('state'), 'unknown')}",
+            f"  source: {_optional_text(download.get('path'))}",
+            f"  destination: {_optional_text(download.get('destination'))}",
+            f"  progress: {format_progress(download)}",
+            f"  error: {_optional_text(download.get('error'))}",
+        ]
+    else:
+        details = ["", "Selected transfer: none"]
+
+    forwards = snapshot.get("remote_localhost_forwards")
+    if isinstance(forwards, list) and forwards:
+        details.extend(["", f"Remote localhost forwards: {len(forwards)}"])
+
+    return lines, downloads, details
+
+
+def render_snapshot_lines(
+    snapshot: Mapping[str, object],
+    *,
+    ssh_host: str | None = None,
+    pane: str | None = None,
+    selected: int = 0,
+    width: int | None = None,
+) -> list[str]:
+    """Render one plain-text snapshot; the curses view uses the same sections."""
+
+    lines, downloads, details = _snapshot_sections(snapshot, ssh_host=ssh_host, pane=pane, selected=selected)
+    if downloads:
+        selected = min(max(selected, 0), len(downloads) - 1)
+        lines.extend(format_download_row(download, selected=index == selected) for index, download in enumerate(downloads))
+    lines.extend(details)
+
+    if width is not None and width > 1:
+        return [line[: width - 1] for line in lines]
+    return lines
+
+
+def render_curses_lines(
+    snapshot: Mapping[str, object],
+    *,
+    ssh_host: str | None,
+    pane: str | None,
+    selected: int,
+    width: int,
+    height: int,
+    footer: str | None = None,
+) -> list[str]:
+    """Render a height-bounded view while keeping the selected row visible."""
+
+    top, downloads, details = _snapshot_sections(snapshot, ssh_host=ssh_host, pane=pane, selected=selected)
+    footer_line = footer or "q quit | arrows/j/k select | c cancel | r retry"
+    if not downloads:
+        top.extend(details)
+        top.append(footer_line)
+        return [line[: max(width - 1, 1)] for line in top[: max(height, 0)]]
+
+    selected = min(max(selected, 0), len(downloads) - 1)
+    row_lines = [format_download_row(download, selected=index == selected) for index, download in enumerate(downloads)]
+    # Keep the machine summary, detail block, and footer fixed while scrolling
+    # only the transfer rows. This makes arrow navigation observable on small
+    # 100x28 (and smaller) popups.
+    available = height - len(top) - len(details) - 1
+    if available < 1:
+        keep_top = max(height - len(details) - 2, 1)
+        top = top[:keep_top]
+        available = max(height - len(top) - len(details) - 1, 1)
+    available = min(available, len(row_lines))
+    first = min(max(selected - available + 1, 0), max(len(row_lines) - available, 0))
+    visible_rows = row_lines[first : first + available]
+    lines = top + visible_rows + details + [footer_line]
+    return [line[: max(width - 1, 1)] for line in lines[: max(height, 0)]]
+
+
+def _display_error(screen: Any, message: str) -> None:
+    height, width = screen.getmaxyx()
+    lines = ["tmux-opener host dashboard", "", f"ERROR: {sanitize_terminal_text(message)}", "", "Press q to quit; any key retries the bridge."]
+    screen.erase()
+    for row, line in enumerate(lines[: max(height, 0)]):
+        if row >= height:
+            break
+        try:
+            screen.addnstr(row, 0, line, max(width - 1, 1))
+        except curses.error:
+            pass
+    screen.refresh()
+
+
+def run_live_dashboard(
+    screen: Any,
+    *,
+    socket_path: str | None,
+    cwd: str,
+    pane: str | None,
+    ssh_host: str | None,
+    timeout: float,
+    local: bool = False,
+    state_dir: str | os.PathLike[str] = DEFAULT_STATE_DIR,
+    snippet_dir: str | os.PathLike[str] = DEFAULT_SNIPPET_DIR,
+    initial_snapshot: dict[str, object] | None = None,
+) -> None:
+    screen.timeout(100)
+    snapshot: dict[str, object] | None = initial_snapshot
+    selected = 0
+    selected_id: object = None
+    error: str | None = None
+    message: str | None = None
+    force_refresh = initial_snapshot is None
+    next_refresh = time.monotonic() + REFRESH_SECONDS if initial_snapshot is not None else 0.0
+    while True:
+        now = time.monotonic()
+        if force_refresh or now >= next_refresh:
+            force_refresh = False
+            next_refresh = now + REFRESH_SECONDS
+            try:
+                latest = (
+                    request_local_status(state_dir, snippet_dir, ssh_host=ssh_host, socket_path=socket_path)
+                    if local
+                    else request_status(socket_path, cwd=cwd, pane=pane, ssh_host=ssh_host, timeout=timeout)
+                )
+                downloads = _download_rows(latest.get("downloads", [])) if isinstance(latest.get("downloads"), list) else []
+                if selected_id is not None:
+                    selected = next((i for i, item in enumerate(downloads) if item.get("id") == selected_id), min(selected, max(len(downloads) - 1, 0)))
+                selected = min(selected, max(len(downloads) - 1, 0))
+                selected_id = downloads[selected].get("id") if downloads else None
+                snapshot = latest
+                error = None
+                message = None
+            except (OSError, ValueError, StatusError) as exc:
+                error = sanitize_terminal_text(exc) or "bridge unavailable"
+
+        if error:
+            _display_error(screen, error)
+        elif snapshot is not None:
+            height, width = screen.getmaxyx()
+            footer = f"{message} | q quit" if message else None
+            lines = render_curses_lines(
+                snapshot,
+                ssh_host=ssh_host,
+                pane=pane,
+                selected=selected,
+                width=width,
+                height=height,
+                footer=footer,
+            )
+            screen.erase()
+            for row, line in enumerate(lines[: max(height, 0)]):
+                try:
+                    screen.addnstr(row, 0, line, max(width - 1, 1))
+                except curses.error:
+                    pass
+            if message and height:
+                try:
+                    screen.addnstr(height - 1, 0, sanitize_terminal_text(message), max(width - 1, 1))
+                except curses.error:
+                    pass
+            screen.refresh()
+
+        key = screen.getch()
+        if key < 0:
+            continue
+        if key in (ord("q"), ord("Q")):
+            return
+        if error:
+            # Any key is an explicit recovery attempt while the bridge error
+            # remains visible; q above is the only exit path.
+            force_refresh = True
+            continue
+        downloads = _download_rows(snapshot.get("downloads", [])) if snapshot and isinstance(snapshot.get("downloads"), list) else []
+        if key in (curses.KEY_UP, ord("k")) and downloads:
+            selected = (selected - 1) % len(downloads)
+            selected_id = downloads[selected].get("id")
+        elif key in (curses.KEY_DOWN, ord("j")) and downloads:
+            selected = (selected + 1) % len(downloads)
+            selected_id = downloads[selected].get("id")
+        elif key in (ord("c"), ord("C")) and downloads:
+            download = downloads[selected]
+            try:
+                if local:
+                    request_local_action(download, "cancel_download", timeout)
+                else:
+                    request_action(socket_path or default_socket_path(), "cancel_download", download.get("id"), timeout, ssh_host)
+                message = f"cancel requested for {_optional_text(download.get('id'))}"
+                force_refresh = True
+            except (OSError, ValueError, StatusError) as exc:
+                error = sanitize_terminal_text(exc) or "bridge unavailable"
+        elif key in (ord("r"), ord("R")):
+            if downloads and str(downloads[selected].get("state", "")) in RETRY_STATES:
+                download = downloads[selected]
+                try:
+                    if local:
+                        request_local_action(download, "retry_download", timeout)
+                    else:
+                        request_action(socket_path or default_socket_path(), "retry_download", download.get("id"), timeout, ssh_host)
+                    message = f"retry requested for {_optional_text(download.get('id'))}"
+                    force_refresh = True
+                except (OSError, ValueError, StatusError) as exc:
+                    error = sanitize_terminal_text(exc) or "bridge unavailable"
+            else:
+                force_refresh = True
+
+
+def _json_error(message: object) -> dict[str, object]:
+    return {"ok": False, "error": sanitize_terminal_text(message)}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--local", action="store_true", help="aggregate desktop client sockets instead of querying a forwarded host")
+    parser.add_argument("--socket", default=None, help="forwarded or explicitly selected client Unix socket")
+    parser.add_argument("--ssh-host", default=os.environ.get("TMUX_OPENER_SSH_HOST"), help="host alias to report")
+    parser.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR), help="desktop client socket state directory")
+    parser.add_argument("--snippet-dir", default=str(DEFAULT_SNIPPET_DIR), help="managed SSH snippet directory")
+    parser.add_argument("--cwd", default=os.environ.get("TMUX_OPENER_CWD") or os.getcwd())
+    parser.add_argument("--pane", default=os.environ.get("TMUX_PANE"), help="originating tmux pane id")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="socket request timeout in seconds")
+    parser.add_argument("--once", action="store_true", help="print one text snapshot and exit")
+    parser.add_argument("--json", action="store_true", help="print one JSON snapshot and exit")
+    return parser
+
+
+def _desktop_fallback(ssh_host: str | None) -> int | None:
+    cli = shutil.which("tmux-opener")
+    if cli is None:
+        return None
+    command = [cli, "terminal-dashboard"]
+    if ssh_host:
+        command.append(ssh_host)
+    return subprocess.run(command, check=False).returncode
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    socket_path = args.socket or (None if args.local else default_socket_path())
+    if args.json or args.once:
+        try:
+            snapshot = (
+                request_local_status(args.state_dir, args.snippet_dir, ssh_host=args.ssh_host, socket_path=socket_path)
+                if args.local
+                else request_status(socket_path, cwd=args.cwd, pane=args.pane, ssh_host=args.ssh_host, timeout=args.timeout)
+            )
+        except (OSError, ValueError, StatusError) as exc:
+            if args.json:
+                print(json.dumps(_json_error(exc), sort_keys=True))
+            else:
+                print(f"tmux-opener-status: {sanitize_terminal_text(exc)}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(snapshot, sort_keys=True))
+        else:
+            print("\n".join(render_snapshot_lines(snapshot, ssh_host=args.ssh_host, pane=args.pane)))
+        return 0
+
+    initial_snapshot: dict[str, object] | None = None
+    if not args.local:
+        try:
+            initial_snapshot = request_status(
+                socket_path,
+                cwd=args.cwd,
+                pane=args.pane,
+                ssh_host=args.ssh_host,
+                timeout=args.timeout,
+            )
+        except (OSError, ValueError, StatusError):
+            fallback_result = _desktop_fallback(args.ssh_host)
+            if fallback_result is not None:
+                return fallback_result
+
+    try:
+        curses.wrapper(
+            lambda screen: run_live_dashboard(
+                screen,
+                socket_path=socket_path,
+                cwd=args.cwd,
+                pane=args.pane,
+                ssh_host=args.ssh_host,
+                timeout=args.timeout,
+                local=args.local,
+                state_dir=args.state_dir,
+                snippet_dir=args.snippet_dir,
+                initial_snapshot=initial_snapshot,
+            )
+        )
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

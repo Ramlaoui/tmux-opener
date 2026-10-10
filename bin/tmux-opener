@@ -25,6 +25,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLIENT = REPO_ROOT / "bin" / "tmux-opener-client"
+sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 
 def default_state_dir() -> Path:
@@ -825,6 +826,47 @@ def status(args: argparse.Namespace) -> None:
     print(f"expected default/allowed SSH host: {host}")
 
 
+def downloads(args: argparse.Namespace) -> int:
+    from tmux_opener_dashboard import collect_status
+    snapshot = collect_status(Path(args.state_dir).expanduser(), Path(args.snippet_dir).expanduser(),
+                              args.host, Path(args.socket).expanduser() if args.socket else None)
+    if args.json:
+        print(json.dumps(snapshot, indent=2))
+        return 0
+    def text(value: object) -> str:
+        return "".join(character for character in str(value)
+                       if not (ord(character) < 32 or 127 <= ord(character) <= 159))
+
+    for client in snapshot["clients"]:
+        print(f"{text(client['host'])}: {'online' if client['online'] else 'offline'}")
+        if not client["online"]:
+            continue
+        info = client.get("client_info", {})
+        print(f"  Client: {text(info.get('user', '?'))}@{text(info.get('hostname', '?'))} ({text(info.get('os', '?'))})")
+        for job in client.get("downloads", []):
+            print(f"  {text(job['id'])[:8]}  {text(job['state']):22} {job['bytes_received']:>12} bytes  {text(job['path'])}")
+        if not client.get("downloads"):
+            print("  No downloads yet")
+    return 0
+
+
+def dashboard(args: argparse.Namespace) -> int:
+    from tmux_opener_dashboard import run_dashboard
+    return run_dashboard(Path(args.state_dir).expanduser(), Path(args.snippet_dir).expanduser(),
+                         args.host, Path(args.socket).expanduser() if args.socket else None, args.no_browser)
+
+
+def terminal_dashboard(args: argparse.Namespace) -> int:
+    command = [sys.executable, str(REPO_ROOT / "scripts" / "tmux-opener-status"), "--local",
+               "--state-dir", str(Path(args.state_dir).expanduser()),
+               "--snippet-dir", str(Path(args.snippet_dir).expanduser())]
+    if args.host:
+        command.extend(["--ssh-host", args.host])
+    if args.socket:
+        command.extend(["--socket", str(Path(args.socket).expanduser())])
+    return subprocess.run(command, check=False).returncode
+
+
 def service_spec(socket_path: Path, backend: str) -> tuple[str, Path, str]:
     key = hashlib.sha256(str(socket_path.absolute()).encode()).hexdigest()[:20]
     label = f"org.tmux-opener.client-{key}"
@@ -1075,6 +1117,18 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--state-dir", default=default_state_dir())
     status_parser.add_argument("--snippet-dir", default=default_snippet_dir())
     status_parser.set_defaults(func=status)
+
+    for name, handler in (("downloads", downloads), ("dashboard", dashboard), ("terminal-dashboard", terminal_dashboard)):
+        view = subcommands.add_parser(name, help="show downloads and local client/remote host information")
+        view.add_argument("host", nargs="?")
+        view.add_argument("--socket")
+        view.add_argument("--state-dir", default=default_state_dir())
+        view.add_argument("--snippet-dir", default=default_snippet_dir())
+        if name == "downloads":
+            view.add_argument("--json", action="store_true", help="print a machine-readable snapshot")
+        elif name == "dashboard":
+            view.add_argument("--no-browser", action="store_true", help="print the dashboard URL without launching a browser")
+        view.set_defaults(func=handler)
 
     restart = subcommands.add_parser("restart-client", help="replace the local client for a host socket")
     restart.add_argument("host", nargs="?")

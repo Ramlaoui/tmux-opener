@@ -48,6 +48,7 @@ case "${kind}" in
       "scripts/tmux-opener-dispatch"
       "scripts/tmux-opener-pick"
       "scripts/tmux-opener-send"
+      "scripts/tmux-opener-status"
       "scripts/tmux_opener_common.py"
       "integration/vimtex.lua"
     )
@@ -56,6 +57,7 @@ case "${kind}" in
       "scripts/tmux-opener-dispatch"
       "scripts/tmux-opener-pick"
       "scripts/tmux-opener-send"
+      "scripts/tmux-opener-status"
     )
     ;;
   client)
@@ -66,10 +68,18 @@ case "${kind}" in
     files=(
       "bin/tmux-opener"
       "bin/tmux-opener-client"
+      "lib/tmux_opener_downloads.py"
+      "lib/tmux_opener_dashboard.py"
+      "lib/dashboard.html"
+      "scripts/tmux-opener-status"
+      "scripts/tmux_opener_common.py"
+      "integration/client.tmux"
     )
     executable_files=(
       "bin/tmux-opener"
       "bin/tmux-opener-client"
+      "scripts/tmux-opener-status"
+      "integration/client.tmux"
     )
     ;;
   *)

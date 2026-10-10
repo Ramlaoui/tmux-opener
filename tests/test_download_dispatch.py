@@ -42,10 +42,13 @@ def test_selection_reaches_client_as_download_requests(tmp_path: Path, flag: str
         )
         receiver.join(timeout=3)
     assert result.returncode == 0, result.stderr
+    metadata = requests[1].pop("host_info")
+    assert metadata["cwd"] == str(tmp_path)
+    assert metadata["hostname"]
     assert requests == [
         {"version": 1, "action": "ping"},
         {"version": 1, "action": "download_file", "path": str(source),
-         "ssh_host": "devbox", "ask_destination": flag == "--save-as"},
+         "ssh_host": "devbox", "ask_destination": flag == "--save-as", "size_bytes": len("contents")},
     ]
 
 

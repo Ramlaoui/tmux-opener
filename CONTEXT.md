@@ -28,6 +28,18 @@ queued; completion is reported by the client. The client applies the same SSH
 host allowlist as remote editor requests and constructs the fixed SSH file-read
 command itself.
 
+**Download Queue**:
+The Local Opener Client's persistent records and bounded transfer workers. Each
+accepted download has an ID, state, byte count, destination, timestamps and
+failure detail. A retry creates a new record; unfinished records are interrupted
+after restart. The client owns cancellation and publication of complete files.
+
+**Status Snapshot**:
+A structured view of the current client, plugin-reported host information and
+download records. The host's tmux dashboard reads its forwarded client, while
+the local browser dashboard aggregates the desktop's client sockets. A reachable
+client process and a recent host report do not prove an active SSH connection.
+
 **Bridge Availability**:
 The runtime condition that an Open Request can cross the Local Opener Bridge for the current terminal session.
 _Avoid_: SSH detection, remote hostname detection, tmux environment detection
