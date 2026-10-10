@@ -150,7 +150,12 @@ available, desktop notifications. Default logs omit paths and SSH stderr;
 enable client `--verbose` for transfer details. Transfers honor the client's
 custom SSH config and disable inherited forwards and shared connections.
 Files appear at their destination only after
-a successful transfer. `d` adds ` (1)`, ` (2)`, etc. if a name already exists.
+a successful transfer. Transfers are resumable: received bytes are kept in a
+private partial copy under `~/.cache/tmux-opener/partial`, so a dropped SSH
+connection (retried automatically twice), a cancel, a client restart or a retry
+continues from where it stopped. The client resumes only while the remote
+file's size and modification time are unchanged; otherwise it starts over.
+Unused partial copies are deleted after 7 days. `d` adds ` (1)`, ` (2)`, etc. if a name already exists.
 For `D`, choose a new filename; existing files are preserved. With several paths,
 `D` asks once per file. Canceling a dialog skips that file.
 

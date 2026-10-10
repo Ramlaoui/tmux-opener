@@ -517,6 +517,9 @@ def _detail_lines(download: Mapping[str, object] | None, width: int) -> list[Lin
         [("  status  ", "label"), (label, style), (f"  {format_progress(download)}", "dim"),
          (f"  {GLYPHS['dot']} updated {_ago(download.get('updated_at'))}", "dim")],
     ]
+    resumed = _number(download.get("resumed_from"))
+    if resumed:
+        lines[-1].append((f"  {GLYPHS['dot']} resumed at {format_bytes(resumed)}", "dim"))
     error = sanitize_terminal_text(download.get("error"))
     lines.append([("  error   ", "label"), (_clip(error, width - 12), "bad")] if error else [])
     return lines

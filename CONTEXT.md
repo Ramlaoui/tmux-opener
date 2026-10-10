@@ -34,6 +34,12 @@ accepted download has an ID, state, byte count, destination, timestamps and
 failure detail. A retry creates a new record; unfinished records are interrupted
 after restart. The client owns cancellation and publication of complete files.
 
+**Partial Copy**:
+The client's private, per-host-and-path record of bytes already received for a
+download, with the remote file's size and modification time. Any later transfer
+of the same remote file resumes from it while that identity is unchanged and
+restarts otherwise. Only one transfer of a remote file runs at a time.
+
 **Status Snapshot**:
 A structured view of the current client, plugin-reported host information and
 download records. The host's tmux dashboard reads its forwarded client, while

@@ -68,10 +68,25 @@ class LocalhostForward:
 REMOTE_LOCALHOST_FORWARDS: dict[tuple[str, str, int], LocalhostForward] = {}
 REMOTE_PDFS: dict[tuple[str, str], subprocess.Popen[bytes] | None] = {}
 SAVE_DIALOG_LOCK = threading.Lock()
+# Seconds to wait before resuming after SSH drops a transfer (exit 255).
+RESUME_DELAYS = (2, 5)
+PARTIAL_MAX_AGE = 7 * 24 * 3600
+# Runs under the remote login shell's `sh -c`: print the file identity, then
+# stream the file, from offset $2 when the identity still matches $3.
+RESUME_SCRIPT = (
+    'test -f "$1" || exit 1; '
+    'id=$(stat -c "%s %Y" -- "$1" 2>/dev/null || stat -f "%z %m" -- "$1") || exit 1; '
+    'echo "$id"; '
+    'if [ "$id" = "$3" ]; then exec tail -c +"$2" -- "$1"; else exec cat -- "$1"; fi'
+)
 
 
 class RequestError(Exception):
     pass
+
+
+class ConnectionDropped(RequestError):
+    """SSH lost the connection; the partial copy can be resumed."""
 
 
 def default_socket_path() -> str:
@@ -169,19 +184,27 @@ def open_with_system(target: str, dry_run: bool, verbose: bool) -> None:
     launch_command(command, dry_run, verbose)
 
 
-def remote_file_command(host: str, path: str, ssh: str, ssh_config: str | None) -> list[str]:
+def ssh_command(host: str, remote_command: str, ssh: str, ssh_config: str | None) -> list[str]:
     command = [ssh]
     if ssh_config is not None:
         command.extend(["-F", str(Path(ssh_config).expanduser())])
-    quoted_path = shlex.quote(path)
     command.extend([
         "-T", "-S", "none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes",
         "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no",
         "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3", "--", host,
-        f"test -f {quoted_path} && cat -- {quoted_path}",
+        "-o", "ServerAliveCountMax=3", "--", host, remote_command,
     ])
     return command
+
+
+def remote_file_command(host: str, path: str, ssh: str, ssh_config: str | None) -> list[str]:
+    quoted_path = shlex.quote(path)
+    return ssh_command(host, f"test -f {quoted_path} && cat -- {quoted_path}", ssh, ssh_config)
+
+
+def resume_command(host: str, path: str, offset: int, identity: str, ssh: str, ssh_config: str | None) -> list[str]:
+    arguments = " ".join(shlex.quote(value) for value in (path, str(offset + 1), identity))
+    return ssh_command(host, f"sh -c {shlex.quote(RESUME_SCRIPT)} sh {arguments}", ssh, ssh_config)
 
 
 def open_remote_pdf(request: dict[str, object], allowed_hosts: set[str] | None, args: argparse.Namespace) -> None:
@@ -195,8 +218,7 @@ def open_remote_pdf(request: dict[str, object], allowed_hosts: set[str] | None, 
     key = (host, path)
     if refresh and key not in REMOTE_PDFS:
         return
-    digest = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
-    cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "tmux-opener" / "pdf" / digest
+    cache = cache_directory("pdf") / cache_key(host, path)
     local_pdf = cache / "document.pdf"
     command = remote_file_command(host, path, shutil.which("ssh") or "ssh", args.ssh_config)
     if args.dry_run:
@@ -831,9 +853,105 @@ def download_notification(message: str) -> None:
             pass
 
 
+def cache_directory(kind: str) -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "tmux-opener" / kind
+
+
+def cache_key(host: str, path: str) -> str:
+    return hashlib.sha256(json.dumps([host, path]).encode("utf-8")).hexdigest()
+
+
 def preview_directory(host: str, path: str) -> Path:
-    digest = hashlib.sha256(json.dumps([host, path]).encode("utf-8")).hexdigest()[:24]
-    return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "tmux-opener" / "preview" / digest
+    return cache_directory("preview") / cache_key(host, path)[:24]
+
+
+def clean_partials() -> None:
+    """Drop partial downloads that nobody resumed within PARTIAL_MAX_AGE."""
+
+    cutoff = time.time() - PARTIAL_MAX_AGE
+    for data in cache_directory("partial").glob("*.part"):
+        try:
+            if data.lstat().st_mtime < cutoff:
+                data.unlink()
+                data.with_suffix(".id").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def receive_partial(
+    host: str, path: str, ssh: str, ssh_config: str | None, partial: BinaryIO, identity_path: Path,
+    verbose: bool, progress, cancel: threading.Event,
+) -> int | None:
+    """Fill the partial copy, resuming when the remote file is unchanged.
+
+    Returns the remote size once every byte arrived, or None if cancelled.
+    """
+
+    offset = os.fstat(partial.fileno()).st_size
+    try:
+        expected = identity_path.read_text(encoding="ascii") if offset else ""
+    except (OSError, UnicodeError):
+        expected = ""
+    command = resume_command(host, path, offset, expected, ssh, ssh_config)
+    header = b""
+    size = None
+    received = 0
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, stdin=subprocess.DEVNULL)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                eof = False
+                while not eof or process.poll() is None:
+                    if cancel.is_set():
+                        terminate_process(process)
+                        return None
+                    for _key, _events in selector.select(timeout=0.2):
+                        chunk = os.read(process.stdout.fileno(), 256 * 1024)
+                        if not chunk:
+                            eof = True
+                            selector.unregister(process.stdout)
+                            break
+                        if size is None:
+                            # The script's first line is the remote "size mtime" identity.
+                            header += chunk
+                            if b"\n" not in header:
+                                if len(header) > 64:
+                                    raise RequestError("remote file identity is invalid")
+                                continue
+                            line, chunk = header.split(b"\n", 1)
+                            identity = line.decode("ascii", errors="replace")
+                            if not re.fullmatch(r"\d{1,20} \d{1,20}", identity):
+                                raise RequestError("remote file identity is invalid")
+                            size = int(identity.split()[0])
+                            if identity == expected:
+                                received = offset
+                            else:
+                                # First attempt, or the remote file changed: the script sent it all.
+                                partial.truncate(0)
+                                identity_path.write_text(identity, encoding="ascii")
+                            partial.seek(received)
+                            progress(bytes_received=received, size_bytes=size, resumed_from=received or None)
+                        if chunk:
+                            partial.write(chunk)
+                            received += len(chunk)
+                            progress(bytes_received=received)
+            if process.returncode:
+                detail = stderr_suffix(errors) if verbose else ""
+                error = ConnectionDropped if process.returncode == 255 else RequestError
+                raise error(f"SSH exited {process.returncode}{detail}")
+        finally:
+            partial.flush()
+            if process.poll() is None:
+                terminate_process(process)
+            process.stdout.close()
+    if size is None:
+        raise RequestError("remote file identity is missing")
+    if received != size:
+        if received > size:
+            partial.truncate(0)
+        raise ConnectionDropped(f"received {received} of {size} bytes")
+    return size
 
 
 def download_file(
@@ -842,20 +960,25 @@ def download_file(
     progress=None, cancel: threading.Event | None = None, preview: bool = False,
 ) -> dict[str, object]:
     temporary: Path | None = None
-    received = 0
-    process = None
+    partial: BinaryIO | None = None
+    cancel = cancel or threading.Event()
+    progress = progress or (lambda **_fields: None)
+
+    def received() -> int:
+        return os.fstat(partial.fileno()).st_size if partial is not None else 0
+
     try:
-        if cancel is not None and cancel.is_set():
+        if cancel.is_set():
             return {"state": "cancelled"}
         directory = preview_directory(host, path) if preview else downloads_directory()
         directory.mkdir(mode=0o700 if preview else 0o777, parents=True, exist_ok=True)
         destination = directory / Path(path).name
         if ask_destination:
             while not SAVE_DIALOG_LOCK.acquire(timeout=0.2):
-                if cancel is not None and cancel.is_set():
+                if cancel.is_set():
                     return {"state": "cancelled"}
             try:
-                destination = choose_download_path(destination, cancel) if cancel is not None else choose_download_path(destination)
+                destination = choose_download_path(destination, cancel)
             finally:
                 SAVE_DIALOG_LOCK.release()
             if destination is None:
@@ -864,74 +987,79 @@ def download_file(
             if destination.exists():
                 raise RequestError(f"destination already exists; choose a new filename: {destination}")
 
-        command = remote_file_command(host, path, ssh, ssh_config)
-        log_line(f"download started: {host}:{path} -> {destination}" if verbose else "download started")
-        if progress is not None:
-            progress(state="downloading", destination=str(destination))
-        with tempfile.NamedTemporaryFile(prefix=".tmux-opener-", suffix=".part",
-                                         dir=destination.parent, delete=False) as output:
-            temporary = Path(output.name)
-            with tempfile.TemporaryFile() as errors:
-                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, stdin=subprocess.DEVNULL)
-                with selectors.DefaultSelector() as selector:
-                    selector.register(process.stdout, selectors.EVENT_READ)
-                    eof = False
-                    while not eof or process.poll() is None:
-                        if cancel is not None and cancel.is_set():
-                            terminate_process(process)
-                            return {"state": "cancelled", "bytes_received": received}
-                        for _key, _events in selector.select(timeout=0.2):
-                            chunk = os.read(process.stdout.fileno(), 256 * 1024)
-                            if not chunk:
-                                eof = True
-                                selector.unregister(process.stdout)
-                                break
-                            output.write(chunk)
-                            received += len(chunk)
-                            if progress is not None:
-                                progress(bytes_received=received)
-                process.stdout.close()
-                if process.returncode:
-                    detail = stderr_suffix(errors) if verbose else ""
-                    raise RequestError(f"SSH exited {process.returncode}{detail}")
+        # Partial copies live in a private cache keyed by host and path, so failed,
+        # cancelled, interrupted and retried transfers continue where they stopped.
+        data_path = cache_directory("partial") / f"{cache_key(host, path)[:32]}.part"
+        identity_path = data_path.with_suffix(".id")
+        data_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        partial = os.fdopen(os.open(data_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600), "r+b")
+        try:
+            fcntl.flock(partial.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.fstat(partial.fileno()).st_ino != data_path.stat().st_ino:
+                raise BlockingIOError
+        except (BlockingIOError, FileNotFoundError):
+            raise RequestError("this file is already being downloaded") from None
 
+        log_line(f"download started: {host}:{path} -> {destination}" if verbose else "download started")
+        progress(state="downloading", destination=str(destination))
+        for delay in (*RESUME_DELAYS, None):
+            try:
+                size = receive_partial(host, path, ssh, ssh_config, partial, identity_path, verbose, progress, cancel)
+                break
+            except ConnectionDropped as exc:
+                if delay is None:
+                    raise
+                if verbose:
+                    log_line(f"download interrupted, resuming in {delay}s: {exc}")
+                if cancel.wait(delay):
+                    size = None
+                    break
+        if size is None:
+            return {"state": "cancelled", "bytes_received": received()}
+
+        source = data_path
+        if data_path.stat().st_dev != destination.parent.stat().st_dev:
+            with tempfile.NamedTemporaryFile(prefix=".tmux-opener-", suffix=".part",
+                                             dir=destination.parent, delete=False) as copy:
+                temporary = Path(copy.name)
+                partial.seek(0)
+                shutil.copyfileobj(partial, copy)
+            source = temporary
         original = destination
         index = 0
         while True:
-            if cancel is not None and cancel.is_set():
-                return {"state": "cancelled", "bytes_received": received}
+            if cancel.is_set():
+                return {"state": "cancelled", "bytes_received": size}
             try:
                 if preview:
                     # A preview copy is a cache entry: refresh it in place.
-                    os.replace(temporary, destination)
-                    temporary = None
+                    os.replace(source, destination)
                     break
                 # Atomic publication without overwriting a file created by another download.
-                os.link(temporary, destination)
+                os.link(source, destination)
                 break
             except FileExistsError:
                 if ask_destination:
                     raise RequestError(f"destination already exists: {destination}")
                 index += 1
                 destination = original.with_name(f"{original.stem} ({index}){original.suffix}")
+        data_path.unlink(missing_ok=True)
+        identity_path.unlink(missing_ok=True)
         message = f"Downloaded {host}:{path} to {destination}"
         if verbose:
             log_line(message)
         if not preview:
             download_notification(message)
-        return {"state": "completed", "destination": str(destination), "bytes_received": received, "error": None}
+        return {"state": "completed", "destination": str(destination), "bytes_received": size, "error": None}
     except (OSError, RequestError) as exc:
         message = f"Download failed for {host}:{path}: {exc}"
         if verbose:
             log_line(message)
         download_notification(message)
-        return {"state": "failed", "bytes_received": received, "error": str(exc)[:2000]}
+        return {"state": "failed", "bytes_received": received(), "error": str(exc)[:2000]}
     finally:
-        if process is not None:
-            if process.poll() is None:
-                terminate_process(process)
-            if process.stdout is not None:
-                process.stdout.close()
+        if partial is not None:
+            partial.close()
         if temporary is not None:
             temporary.unlink(missing_ok=True)
 
@@ -1383,6 +1511,7 @@ def main() -> int:
 
     server = bind_server(args.socket)
     stop = threading.Event()
+    clean_partials()
     try:
         args.download_queue = DownloadQueue(
             Path(args.socket).expanduser().with_suffix(".downloads.json"),
