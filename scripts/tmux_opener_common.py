@@ -79,7 +79,7 @@ def log_line(log_path: str | None, message: str) -> None:
 
 def describe_request(request: dict[str, object]) -> str:
     action = request.get("action")
-    if action in ("open_url", "open_remote_localhost", "open_vscode_remote", "download_file", "ping"):
+    if action in ("open_url", "open_remote_localhost", "open_vscode_remote", "open_remote_pdf", "download_file", "ping"):
         return f"action={action}"
     return "action=unknown"
 

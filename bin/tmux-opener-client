@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import filecmp
+import hashlib
 import json
 import os
 import platform
@@ -59,6 +61,7 @@ class LocalhostForward:
 
 
 REMOTE_LOCALHOST_FORWARDS: dict[tuple[str, str, int], LocalhostForward] = {}
+REMOTE_PDFS: dict[tuple[str, str], subprocess.Popen[bytes] | None] = {}
 SAVE_DIALOG_LOCK = threading.Lock()
 
 
@@ -92,6 +95,7 @@ def ping_response(args: argparse.Namespace) -> dict[str, object]:
         "version": 1,
         "instance_id": INSTANCE_ID,
         "client": "tmux-opener-client",
+        "capabilities": ["remote_pdf"],
         "pid": os.getpid(),
         "default_ssh_host": args.default_ssh_host,
         "allowed_ssh_hosts": sorted(args.allow_ssh_host),
@@ -123,7 +127,7 @@ def launch_command(
     dry_run: bool,
     verbose: bool,
     command_label: str | None = None,
-) -> None:
+) -> subprocess.Popen[bytes] | None:
     label = command_label or "system opener"
     command_display = command_text(command) if verbose else label
     if dry_run:
@@ -145,6 +149,7 @@ def launch_command(
         raise RequestError(f"failed to launch opener (errno={exc.errno})") from exc
 
     LAUNCHED_PROCESSES.append(process)
+    return process
 
 
 def open_with_system(target: str, dry_run: bool, verbose: bool) -> None:
@@ -157,6 +162,81 @@ def open_with_system(target: str, dry_run: bool, verbose: bool) -> None:
         command = ["xdg-open", target]
 
     launch_command(command, dry_run, verbose)
+
+
+def remote_file_command(host: str, path: str, ssh: str, ssh_config: str | None) -> list[str]:
+    command = [ssh]
+    if ssh_config is not None:
+        command.extend(["-F", str(Path(ssh_config).expanduser())])
+    quoted_path = shlex.quote(path)
+    command.extend([
+        "-T", "-S", "none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes",
+        "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no",
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3", "--", host,
+        f"test -f {quoted_path} && cat -- {quoted_path}",
+    ])
+    return command
+
+
+def open_remote_pdf(request: dict[str, object], allowed_hosts: set[str] | None, args: argparse.Namespace) -> None:
+    host = validate_host(request.get("ssh_host"), allowed_hosts)
+    path = validate_path(request.get("path"))
+    if Path(path).suffix.lower() != ".pdf":
+        raise RequestError("path must name a PDF")
+    refresh = request.get("refresh", False)
+    if type(refresh) is not bool:
+        raise RequestError("refresh must be a boolean")
+    key = (host, path)
+    if refresh and key not in REMOTE_PDFS:
+        return
+    digest = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
+    cache = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "tmux-opener" / "pdf" / digest
+    local_pdf = cache / "document.pdf"
+    command = remote_file_command(host, path, shutil.which("ssh") or "ssh", args.ssh_config)
+    if args.dry_run:
+        log_line("dry-run remote PDF refresh" if refresh else "dry-run remote PDF open")
+        return
+    try:
+        cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=cache) as staging:
+            downloaded = Path(staging) / "document.pdf"
+            with downloaded.open("wb") as output:
+                result = subprocess.run(command, stdout=output, stderr=subprocess.PIPE,
+                                        stdin=subprocess.DEVNULL, timeout=20, check=False)
+            if result.returncode:
+                if args.verbose:
+                    log_line(result.stderr[-PROCESS_STDERR_LOG_LIMIT:].decode("utf-8", errors="replace"))
+                raise RequestError(f"PDF transfer failed (ssh rc={result.returncode})")
+            with downloaded.open("rb") as output:
+                header = output.read(5)
+            if header != b"%PDF-":
+                raise RequestError("remote file does not have a PDF header")
+            if not local_pdf.exists() or not filecmp.cmp(downloaded, local_pdf, shallow=False):
+                # Replace only complete successful downloads; keep the last good PDF on failures.
+                os.replace(downloaded, local_pdf)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RequestError(f"PDF transfer failed ({type(exc).__name__})") from exc
+    if refresh:
+        return
+    viewer = getattr(args, "pdf_viewer", "auto")
+    system = platform.system()
+    if viewer == "auto":
+        if system == "Linux" and shutil.which("zathura"):
+            viewer = "zathura"
+        elif system == "Darwin" and Path("/Applications/Skim.app").is_dir():
+            viewer = "skim"
+        else:
+            viewer = "system"
+    process = REMOTE_PDFS.get(key)
+    if viewer == "zathura":
+        if process is None or process.poll() is not None:
+            process = launch_command(["zathura", str(local_pdf)], False, args.verbose, "PDF viewer")
+    elif viewer == "skim":
+        process = launch_command(["open", "-a", "Skim", str(local_pdf)], False, args.verbose, "PDF viewer")
+    else:
+        open_with_system(str(local_pdf), False, args.verbose)
+    REMOTE_PDFS[key] = process
 
 
 def validate_url(url: object, allowed_schemes: set[str]) -> str:
@@ -666,17 +746,7 @@ def download_file(
             if destination.exists():
                 raise RequestError(f"destination already exists; choose a new filename: {destination}")
 
-        quoted_path = shlex.quote(path)
-        command = [ssh]
-        if ssh_config is not None:
-            command.extend(["-F", str(Path(ssh_config).expanduser())])
-        command.extend([
-            "-T", "-S", "none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes",
-            "-o", "PermitLocalCommand=no", "-o", "ForkAfterAuthentication=no",
-            "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
-            "-o", "ServerAliveCountMax=3", "--", host,
-            f"test -f {quoted_path} && cat -- {quoted_path}",
-        ])
+        command = remote_file_command(host, path, ssh, ssh_config)
         log_line(f"download started: {host}:{path} -> {destination}" if verbose else "download started")
         with tempfile.NamedTemporaryFile(prefix=".tmux-opener-", suffix=".part",
                                          dir=destination.parent, delete=False) as output:
@@ -721,7 +791,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
     if action == "ping":
         return
 
-    if action in ("open_url", "open_vscode_remote", "open_remote_localhost", "download_file"):
+    if action in ("open_url", "open_vscode_remote", "open_remote_localhost", "open_remote_pdf", "download_file"):
         log_line(f"request action={action}")
 
     if action == "open_url":
@@ -751,7 +821,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
         )
         return
 
-    if action in ("open_remote_localhost", "download_file"):
+    if action in ("open_remote_localhost", "open_remote_pdf", "download_file"):
         if "ssh_host" not in request and args.default_ssh_host:
             request = {**request, "ssh_host": args.default_ssh_host}
         if args.allow_any_ssh_host:
@@ -760,6 +830,9 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> None:
             allowed_hosts = set(args.allow_ssh_host)
         else:
             raise RequestError("no SSH hosts are allowed; pass --allow-ssh-host HOST")
+        if action == "open_remote_pdf":
+            open_remote_pdf(request, allowed_hosts, args)
+            return
         if action == "open_remote_localhost":
             open_remote_localhost(request, allowed_hosts, args)
             return
@@ -1019,6 +1092,9 @@ def main() -> int:
     parser.add_argument("--allow-any-ssh-host", action="store_true")
     parser.add_argument("--default-ssh-host")
     parser.add_argument("--ssh-config", help="SSH config used for auxiliary localhost connections")
+    parser.add_argument("--pdf-viewer", choices=("auto", "zathura", "skim", "system"),
+                        default=os.environ.get("TMUX_OPENER_PDF_VIEWER", "auto"),
+                        help="local PDF viewer (default: auto; also TMUX_OPENER_PDF_VIEWER)")
     parser.add_argument(
         "--vscode-folder-window",
         choices=VSCODE_WINDOW_POLICIES,

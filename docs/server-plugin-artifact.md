@@ -7,6 +7,7 @@ This archive contains only the remote tmux side of tmux-opener:
 - `scripts/tmux-opener-pick`
 - `scripts/tmux-opener-send`
 - `scripts/tmux_opener_common.py`
+- `integration/vimtex.lua`
 
 It does not include the Local Opener Client or the SSH setup wrapper. Install
 and run the local side separately on the desktop machine that should open URLs
@@ -41,6 +42,19 @@ set -g @plugin 'Ramlaoui/tmux-opener'
 This archive is mainly for pinned server-side installs on remote hosts where a
 Git checkout is inconvenient.
 
+## Remote VimTeX preview
+
+With `uv` installed on the remote host, add this to VimTeX's Neovim `init` configuration:
+
+```lua
+dofile(vim.fn.expand('~/.tmux/plugins/tmux-opener/integration/vimtex.lua')).setup()
+```
+
+Update the desktop client as well, then connect through `tmux-opener ssh HOST`.
+Press `\ll` in remote Neovim to compile and open a local PDF window. Successful
+builds update the same cached local PDF without reopening the viewer. The adapter
+retains your existing viewer if the bridge lacks remote PDF support.
+
 ## Delivery guarantees
 
 Update the desktop client alongside this plugin: bridge health requires a
@@ -49,7 +63,7 @@ a complete, valid acknowledgement. A dropped connection or missing reply is not
 success, and requests are never automatically replayed because the desktop
 action may already have happened.
 
-The default deadline for each bridge exchange is five seconds, including response
+The default deadline for each bridge exchange is five seconds (30 seconds for PDFs), including response
 reads. The preliminary health probe uses the same `--timeout` as the Open Request,
 so a slow but healthy bridge is not rejected by a shorter hidden timeout.
 

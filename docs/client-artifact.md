@@ -47,6 +47,22 @@ The local client only accepts structured Open Requests. Remote file/editor
 requests are rejected unless the client was started for the target host, or was
 explicitly started with `--allow-ssh-host HOST`.
 
+## Native remote PDF preview
+
+The remote VimTeX adapter sends `open_remote_pdf` requests. The client fetches
+the PDF over SSH, opens a stable local copy, and replaces it after successful
+builds. Refresh requests never reopen or focus the viewer; transfer failures
+preserve the previous PDF. SSH aliases and custom SSH configuration still apply.
+
+The default viewer is Zathura on Linux when installed, Skim on macOS when installed,
+or the system PDF handler. The viewer must support automatic file reloading; enable
+that preference in Skim. `--pdf-viewer` or `TMUX_OPENER_PDF_VIEWER` can select
+`auto`, `zathura`, `skim`, or `system`. Restart the desktop client after updating:
+
+```sh
+tmux-opener restart-client HOST
+```
+
 ## Safe client ownership
 
 Each client holds a lifetime lock beside its socket; wrapper lifecycle operations

@@ -34,6 +34,7 @@ shell commands for the local client to execute.
 - A local desktop opener: `open` on macOS or `xdg-open` on Linux
 - Optional: VS Code's `code` CLI for direct Remote-SSH editor launches
 - Optional: `fzf` for the prefix target picker
+- Optional: Neovim, VimTeX, and `uv` on the remote host for LaTeX PDF preview
 
 ## Install
 
@@ -97,6 +98,36 @@ tmux-opener ssh --dry-run --no-start-client HOST
 
 Inside remote tmux copy mode, select a URL or path and press `o`. If `fzf` is
 installed, the prefix target picker also uses `o` by default.
+
+### VimTeX PDF preview
+
+The repository includes an opt-in Neovim adapter for VimTeX. It only changes
+VimTeX when the forwarded tmux-opener bridge is reachable and advertises PDF
+support, so ordinary local VimTeX configuration is left alone when no bridge
+or an older client is active.
+
+Load it before VimTeX initializes:
+
+```lua
+dofile(vim.fn.expand('~/.tmux/plugins/tmux-opener/integration/vimtex.lua')).setup()
+```
+
+With lazy.nvim, put the same call in VimTeX's `init` function. If the plugin is
+installed somewhere else, use that checkout's absolute path instead.
+
+After connecting with `tmux-opener ssh HOST`, open the `.tex` file in remote
+Neovim and press `\ll`. VimTeX compiles on the remote host; on the first
+successful build the local client fetches and opens the PDF, and later
+successful builds refresh that already-open local viewer. `\lv` opens it on
+demand. No web server or manual PDF copying is needed.
+
+The adapter uses the repository's absolute `scripts/tmux-opener-send` path for
+VimTeX's general viewer. Compile-success refreshes are sent asynchronously via
+`uv run --no-project --no-sync`. Update and restart the local
+`tmux-opener-client`, then reconnect the SSH session, when upgrading to a
+client that supports PDF requests.
+
+### Download remote files
 
 Select a file path in copy mode and press:
 
