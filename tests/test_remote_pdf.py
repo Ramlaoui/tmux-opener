@@ -47,9 +47,11 @@ def test_pdf_opens_once_and_refresh_replaces_same_path(preview):
     local_pdf = next(cache.rglob("document.pdf"))
     assert local_pdf.read_bytes() == state["pdf"]
     transfer_command = calls[0][1]
-    assert shlex.split(transfer_command[-1]) == ["cat", "--", request["path"]]
+    assert shlex.split(transfer_command[-1]) == ["test", "-f", request["path"], "&&", "cat", "--", request["path"]]
     assert "ClearAllForwardings=yes" in transfer_command
     assert "BatchMode=yes" in transfer_command
+    assert transfer_command[transfer_command.index("-S") + 1] == "none"
+    assert "PermitLocalCommand=no" in transfer_command
     assert calls[1] == ("viewer", ["zathura", str(local_pdf)])
 
     original_inode = local_pdf.stat().st_ino

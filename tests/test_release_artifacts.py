@@ -147,6 +147,13 @@ def test_tmux_plugin_key_bindings() -> None:
         prefix_keys = run_command([tmux, "-L", server_name, "list-keys", "-T", "prefix"]).stdout
         assert "tmux-opener-dispatch" in vi_keys
         assert "tmux-opener-dispatch" in emacs_keys
+        for keys in (vi_keys, emacs_keys):
+            download = next(line for line in keys.splitlines() if "--download" in line)
+            save_as = next(line for line in keys.splitlines() if "--save-as" in line)
+            assert " d " in download
+            assert " D " in save_as
+            assert "copy-pipe-and-cancel" in download
+            assert "copy-pipe-and-cancel" in save_as
         assert "tmux-opener-pick" in prefix_keys
         assert "display-popup" in prefix_keys
         assert "display-popup -E" not in prefix_keys

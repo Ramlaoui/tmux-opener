@@ -5,20 +5,28 @@ This context defines the language for opening local desktop targets from remote 
 ## Language
 
 **Local Opener Bridge**:
-The client-mediated boundary where a remote terminal session asks a local desktop session to open a target. It is not remote command execution on the local machine.
+The client-mediated boundary where a remote terminal session asks a local desktop session to open a target or download a file. It is not remote command execution on the local machine.
 _Avoid_: Ghostty bridge, xdg-open forwarding, remote GUI opener
 
 **Remote Opener Plugin**:
-The tmux-facing participant that turns selected terminal text into an open request. It belongs to the remote session and does not own local desktop behavior.
+The tmux-facing participant that turns selected terminal text into an Open Request or Download Request. It belongs to the remote session and does not own local desktop behavior.
 _Avoid_: local opener, desktop plugin
 
 **Local Opener Client**:
-The desktop-side participant that receives open requests and decides how they are satisfied locally. It owns local browser and editor dispatch.
+The desktop-side participant that receives requests and decides how they are satisfied locally. It owns local browser and editor dispatch, file transfers, and save dialogs.
 _Avoid_: remote daemon, tmux daemon
 
 **Open Request**:
 A structured statement of intent to open a URL or a remote file path. It is data, not a shell command.
 _Avoid_: open command, shell snippet
+
+**Download Request**:
+A structured request to copy a remote regular file to the client machine. The
+Local Opener Client owns the destination: its Downloads folder, or a location
+selected in a local save dialog. An acknowledgement means the transfer was
+queued; completion is reported by the client. The client applies the same SSH
+host allowlist as remote editor requests and constructs the fixed SSH file-read
+command itself.
 
 **Bridge Availability**:
 The runtime condition that an Open Request can cross the Local Opener Bridge for the current terminal session.

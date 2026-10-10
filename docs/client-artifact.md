@@ -12,8 +12,10 @@ separately on the SSH/tmux hosts where selections should be opened.
 
 - Python 3.10 or newer
 - `ssh`
+- SSH key/agent authentication for background file downloads
 - A desktop opener: `open` on macOS, `xdg-open` on Linux, or `cmd /c start` on Windows
 - Optional: VS Code's `code` CLI for direct Remote-SSH editor launches
+- For the `D` save dialog: native macOS support, or `zenity`, `kdialog`, or Python Tk
 
 ## Install from archive
 
@@ -134,3 +136,15 @@ Exit statuses: 0 healthy, 1 local configuration/client prerequisite failed,
 failure, 4 wrong desktop/client instance. Failures suggest the next action without
 printing remote request payloads or SSH stderr. If the local client restarts
 during doctor, rerun the diagnostic to obtain a fresh identity comparison.
+
+## Download selected files
+
+In remote tmux copy mode, `d` downloads selected files into this machine's
+Downloads folder; `D` opens a local save dialog for each file. Downloads run in
+the background and use the allowed SSH host. Existing files are preserved:
+`d` chooses a numbered name on collision and `D` requires a new filename.
+Completion and failures are recorded in the client log, with desktop
+notifications when `notify-send` is available.
+Default logs omit paths and SSH stderr; enable client `--verbose` for details.
+Downloads honor the client's `--ssh-config` and disable inherited forwarding,
+connection sharing, and local commands.
