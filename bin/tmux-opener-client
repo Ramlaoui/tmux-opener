@@ -34,17 +34,15 @@ from typing import BinaryIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from tmux_opener_downloads import DownloadQueue  # noqa: E402
+import tmux_opener_settings as opener_settings  # noqa: E402
 
 
 HOST_RE = re.compile(r"^[A-Za-z0-9_.@:-]+$")
 DEFAULT_URL_SCHEMES = ("http", "https")
-DEFAULT_VSCODE_FOLDER_WINDOW = "new"
-DEFAULT_VSCODE_FILE_WINDOW = "new"
 DEFAULT_LOCALHOST_FORWARD_START_PORT = 18000
 DEFAULT_LOCALHOST_FORWARD_END_PORT = 18999
 LOCALHOST_FORWARD_STARTUP_TIMEOUT = 1.0
 PROCESS_STDERR_LOG_LIMIT = 2000
-VSCODE_WINDOW_POLICIES = ("new", "reuse")
 LOCALHOST_SCHEMES = ("http", "https")
 REMOTE_LOCALHOST_HOSTS = ("localhost", "127.0.0.1")
 REQUEST_TIMEOUT = 2.0
@@ -102,7 +100,7 @@ def ping_response(args: argparse.Namespace) -> dict[str, object]:
         "version": 1,
         "instance_id": INSTANCE_ID,
         "client": "tmux-opener-client",
-        "capabilities": ["remote_pdf", "download_status"],
+        "capabilities": ["remote_pdf", "download_status", "settings"],
         "pid": os.getpid(),
         "default_ssh_host": args.default_ssh_host,
         "allowed_ssh_hosts": sorted(args.allow_ssh_host),
@@ -224,15 +222,7 @@ def open_remote_pdf(request: dict[str, object], allowed_hosts: set[str] | None, 
                 os.replace(downloaded, local_pdf)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RequestError(f"PDF transfer failed ({type(exc).__name__})") from exc
-    viewer = getattr(args, "pdf_viewer", "auto")
-    system = platform.system()
-    if viewer == "auto":
-        if system == "Linux" and shutil.which("zathura"):
-            viewer = "zathura"
-        elif system == "Darwin" and Path("/Applications/Skim.app").is_dir():
-            viewer = "skim"
-        else:
-            viewer = "system"
+    viewer = pdf_viewer(args)
     if refresh:
         if viewer == "skim":
             # Skim watches file objects; replacing the cache needs an explicit reload.
@@ -260,14 +250,30 @@ end run'''
                 raise RequestError("Skim reload failed; allow the desktop client to control Skim in macOS Automation settings")
         return
     process = REMOTE_PDFS.get(key)
-    if viewer == "zathura":
-        if process is None or process.poll() is not None:
-            process = launch_command(["zathura", str(local_pdf)], False, args.verbose, "PDF viewer")
-    elif viewer == "skim":
-        process = launch_command(["open", "-a", "Skim", str(local_pdf)], False, args.verbose, "PDF viewer")
-    else:
-        open_with_system(str(local_pdf), False, args.verbose)
+    if viewer != "zathura" or process is None or process.poll() is not None:
+        process = open_local_copy(local_pdf, args)
     REMOTE_PDFS[key] = process
+
+
+def pdf_viewer(args: argparse.Namespace) -> str:
+    viewer = getattr(args, "pdf_viewer", None) or opener_settings.load()[0]["pdf_viewer"]
+    if viewer == "auto":
+        if platform.system() == "Linux" and shutil.which("zathura"):
+            return "zathura"
+        if platform.system() == "Darwin" and Path("/Applications/Skim.app").is_dir():
+            return "skim"
+        return "system"
+    return str(viewer)
+
+
+def open_local_copy(path: Path, args: argparse.Namespace) -> subprocess.Popen[bytes] | None:
+    viewer = pdf_viewer(args) if path.suffix.lower() == ".pdf" else "system"
+    if viewer == "zathura":
+        return launch_command(["zathura", str(path)], False, args.verbose, "PDF viewer")
+    if viewer == "skim":
+        return launch_command(["open", "-a", "Skim", str(path)], False, args.verbose, "PDF viewer")
+    open_with_system(str(path), False, args.verbose)
+    return None
 
 
 def validate_url(url: object, allowed_schemes: set[str]) -> str:
@@ -384,8 +390,8 @@ def open_vscode_remote(
     allowed_hosts: set[str] | None,
     dry_run: bool,
     verbose: bool,
-    folder_window: str = DEFAULT_VSCODE_FOLDER_WINDOW,
-    file_window: str = DEFAULT_VSCODE_FILE_WINDOW,
+    folder_window: str = "new",
+    file_window: str = "new",
 ) -> None:
     host = validate_host(request.get("ssh_host"), allowed_hosts)
     path = validate_path(request.get("path"))
@@ -772,10 +778,15 @@ def download_notification(message: str) -> None:
             pass
 
 
+def preview_directory(host: str, path: str) -> Path:
+    digest = hashlib.sha256(json.dumps([host, path]).encode("utf-8")).hexdigest()[:24]
+    return Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "tmux-opener" / "preview" / digest
+
+
 def download_file(
     host: str, path: str, ask_destination: bool, ssh: str,
     ssh_config: str | None = None, verbose: bool = False,
-    progress=None, cancel: threading.Event | None = None,
+    progress=None, cancel: threading.Event | None = None, preview: bool = False,
 ) -> dict[str, object]:
     temporary: Path | None = None
     received = 0
@@ -783,8 +794,8 @@ def download_file(
     try:
         if cancel is not None and cancel.is_set():
             return {"state": "cancelled"}
-        directory = downloads_directory()
-        directory.mkdir(parents=True, exist_ok=True)
+        directory = preview_directory(host, path) if preview else downloads_directory()
+        directory.mkdir(mode=0o700 if preview else 0o777, parents=True, exist_ok=True)
         destination = directory / Path(path).name
         if ask_destination:
             while not SAVE_DIALOG_LOCK.acquire(timeout=0.2):
@@ -837,6 +848,11 @@ def download_file(
             if cancel is not None and cancel.is_set():
                 return {"state": "cancelled", "bytes_received": received}
             try:
+                if preview:
+                    # A preview copy is a cache entry: refresh it in place.
+                    os.replace(temporary, destination)
+                    temporary = None
+                    break
                 # Atomic publication without overwriting a file created by another download.
                 os.link(temporary, destination)
                 break
@@ -848,7 +864,8 @@ def download_file(
         message = f"Downloaded {host}:{path} to {destination}"
         if verbose:
             log_line(message)
-        download_notification(message)
+        if not preview:
+            download_notification(message)
         return {"state": "completed", "destination": str(destination), "bytes_received": received, "error": None}
     except (OSError, RequestError) as exc:
         message = f"Download failed for {host}:{path}: {exc}"
@@ -864,6 +881,27 @@ def download_file(
                 process.stdout.close()
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def queue_download(host: str, path: str, args: argparse.Namespace, ask_destination: bool = False,
+                   size_bytes: object = None, preview: bool = False) -> dict[str, object] | None:
+    if len(path) > 4096 or Path(path).name in ("", ".", "..") or any(character in path for character in "\r\n"):
+        raise RequestError("download path must name a file and contain no newlines")
+    if preview and Path(path).suffix.lower() not in opener_settings.PREVIEW_SUFFIXES:
+        raise RequestError(f"local preview is not allowed for {Path(path).suffix or 'extensionless'} files")
+    if size_bytes is not None and (type(size_bytes) is not int or not 0 <= size_bytes <= 2**63 - 1):
+        raise RequestError("size_bytes must be a non-negative integer")
+    if not shutil.which("ssh"):
+        raise RequestError("ssh is not installed on the client")
+    if args.dry_run:
+        destination = "local preview" if preview else "client save dialog" if ask_destination else downloads_directory()
+        log_line(f"dry-run download: {host}:{path} -> {destination}" if args.verbose else "dry-run download")
+        return None
+    try:
+        job = args.download_queue.submit(host, path, ask_destination, size_bytes, preview)
+    except (ValueError, OSError) as exc:
+        raise RequestError("download queue could not accept this transfer") from exc
+    return {"download_id": job["id"], "state": "queued"}
 
 
 def observe_host(request: dict[str, object], args: argparse.Namespace) -> None:
@@ -910,6 +948,19 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
     observe_host(request, args)
     if action == "get_status":
         return status_response(request, args)
+    if action == "get_settings":
+        settings, error = opener_settings.load()
+        return {"settings": settings, "error": error, "path": str(opener_settings.settings_path()),
+                "preview_suffixes": sorted(opener_settings.PREVIEW_SUFFIXES)}
+    if action == "set_settings":
+        try:
+            settings = opener_settings.save(request.get("settings"))
+        except ValueError as exc:
+            raise RequestError(str(exc)) from exc
+        except OSError as exc:
+            raise RequestError("settings could not be saved") from exc
+        log_line("settings updated")
+        return {"settings": settings}
     if action in {"cancel_download", "retry_download"}:
         identifier = request.get("download_id")
         if not isinstance(identifier, str) or not re.fullmatch(r"[a-f0-9]{32}", identifier):
@@ -949,13 +1000,22 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
             allowed_hosts = set(args.allow_ssh_host)
         else:
             raise RequestError("no SSH hosts are allowed; pass --allow-ssh-host HOST")
+        settings = opener_settings.load()[0]
+        path = validate_path(request.get("path"))
+        opener = "vscode"
+        if validate_target_type(request.get("target_type")) == "file":
+            opener = opener_settings.opener_for(settings, path)
+        if opener != "vscode":
+            log_line(f"rule opener={opener}")
+            host = validate_host(request.get("ssh_host"), allowed_hosts)
+            return queue_download(host, path, args, preview=opener == "preview")
         open_vscode_remote(
             request,
             allowed_hosts,
             args.dry_run,
             args.verbose,
-            folder_window=args.vscode_folder_window,
-            file_window=args.vscode_file_window,
+            folder_window=args.vscode_folder_window or settings["vscode_folder_window"],
+            file_window=args.vscode_file_window or settings["vscode_file_window"],
         )
         return
 
@@ -976,26 +1036,10 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
             return
         host = validate_host(request.get("ssh_host"), allowed_hosts)
         path = validate_path(request.get("path"))
-        if len(path) > 4096 or Path(path).name in ("", ".", "..") or any(character in path for character in "\r\n"):
-            raise RequestError("download path must name a file and contain no newlines")
         ask_destination = request.get("ask_destination", False)
         if not isinstance(ask_destination, bool):
             raise RequestError("ask_destination must be a boolean")
-        size_bytes = request.get("size_bytes")
-        if size_bytes is not None and (type(size_bytes) is not int or not 0 <= size_bytes <= 2**63 - 1):
-            raise RequestError("size_bytes must be a non-negative integer")
-        ssh = shutil.which("ssh")
-        if not ssh:
-            raise RequestError("ssh is not installed on the client")
-        if args.dry_run:
-            message = f"dry-run download: {host}:{path} -> {'client save dialog' if ask_destination else downloads_directory()}"
-            log_line(message if args.verbose else "dry-run download")
-            return
-        try:
-            job = args.download_queue.submit(host, path, ask_destination, size_bytes)
-        except (ValueError, OSError) as exc:
-            raise RequestError("download queue could not accept this transfer") from exc
-        return {"download_id": job["id"], "state": "queued"}
+        return queue_download(host, path, args, ask_destination, request.get("size_bytes"))
 
     raise RequestError("unsupported action")
 
@@ -1225,6 +1269,20 @@ def bind_server(socket_path: str) -> OwnedServer:
         raise
 
 
+def transfer_job(job: dict, update, cancel: threading.Event, args: argparse.Namespace) -> dict[str, object]:
+    preview = bool(job.get("preview"))
+    result = download_file(
+        job["ssh_host"], job["path"], job["ask_destination"], shutil.which("ssh") or "ssh",
+        args.ssh_config, args.verbose, progress=update, cancel=cancel, preview=preview,
+    )
+    if preview and result["state"] == "completed":
+        try:
+            open_local_copy(Path(str(result["destination"])), args)
+        except RequestError as exc:
+            result.update(state="failed", error=f"Copied, but opening failed: {exc}")
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", default=default_socket_path(), help="local Unix socket path")
@@ -1236,20 +1294,18 @@ def main() -> int:
     parser.add_argument("--allow-any-ssh-host", action="store_true")
     parser.add_argument("--default-ssh-host")
     parser.add_argument("--ssh-config", help="SSH config used for auxiliary localhost connections")
-    parser.add_argument("--pdf-viewer", choices=("auto", "zathura", "skim", "system"),
-                        default=os.environ.get("TMUX_OPENER_PDF_VIEWER", "auto"),
-                        help="local PDF viewer (default: auto; also TMUX_OPENER_PDF_VIEWER)")
+    parser.add_argument("--pdf-viewer", choices=opener_settings.PDF_VIEWERS,
+                        default=os.environ.get("TMUX_OPENER_PDF_VIEWER") or None,
+                        help="local PDF viewer; overrides the settings file (also TMUX_OPENER_PDF_VIEWER)")
     parser.add_argument(
         "--vscode-folder-window",
-        choices=VSCODE_WINDOW_POLICIES,
-        default=DEFAULT_VSCODE_FOLDER_WINDOW,
-        help="VS Code window policy for remote folders (default: new)",
+        choices=opener_settings.WINDOW_POLICIES,
+        help="VS Code window policy for remote folders; overrides the settings file",
     )
     parser.add_argument(
         "--vscode-file-window",
-        choices=VSCODE_WINDOW_POLICIES,
-        default=DEFAULT_VSCODE_FILE_WINDOW,
-        help="VS Code window policy for remote files (default: new)",
+        choices=opener_settings.WINDOW_POLICIES,
+        help="VS Code window policy for remote files; overrides the settings file",
     )
     parser.add_argument(
         "--localhost-forward-start-port",
@@ -1270,10 +1326,7 @@ def main() -> int:
     try:
         args.download_queue = DownloadQueue(
             Path(args.socket).expanduser().with_suffix(".downloads.json"),
-            lambda job, update, cancel: download_file(
-                job["ssh_host"], job["path"], job["ask_destination"], shutil.which("ssh") or "ssh",
-                args.ssh_config, args.verbose, progress=update, cancel=cancel,
-            ),
+            lambda job, update, cancel: transfer_job(job, update, cancel, args),
         )
     except (OSError, ValueError, KeyError, TypeError):
         server.cleanup()

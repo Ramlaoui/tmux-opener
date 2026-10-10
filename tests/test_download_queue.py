@@ -250,3 +250,21 @@ def test_close_cancels_active_workers_and_interrupts_queued_jobs(tmp_path: Path)
     finally:
         if not queue.closing:
             queue.close()
+
+
+def test_retry_keeps_preview_flag(tmp_path: Path) -> None:
+    seen: list[object] = []
+
+    def transfer(job: dict[str, object], _update: Callable[..., None], _cancel: threading.Event) -> dict[str, object]:
+        seen.append(job["preview"])
+        return {"state": "failed", "error": "synthetic failure"}
+
+    queue = DownloadQueue(tmp_path / "history.json", transfer)
+    try:
+        original = queue.submit("devbox", "/remote/plot.png", False, preview=True)
+        wait_for(lambda: any(record["state"] == "failed" for record in queue.snapshot()))
+        queue.retry(original["id"], "devbox")
+        wait_for(lambda: len(seen) == 2)
+        assert seen == [True, True]
+    finally:
+        queue.close()
