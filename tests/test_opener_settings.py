@@ -16,6 +16,22 @@ sys.path.insert(0, str(ROOT / "lib"))
 import tmux_opener_settings as settings_module  # noqa: E402
 
 
+def test_viewer_detection_uses_desktop_installations(monkeypatch):
+    monkeypatch.setattr(settings_module.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(settings_module.shutil, "which", lambda _name: None)
+    installed = {"/Applications/sioyek.app", "/Applications/Adobe Acrobat DC/Adobe Acrobat.app"}
+    monkeypatch.setattr(Path, "is_dir", lambda path: str(path) in installed)
+    monkeypatch.setattr(settings_module.os, "access", lambda path, _mode: str(path).endswith("MacOS/sioyek"))
+    assert settings_module.available_pdf_viewers() == ["auto", "sioyek", "acrobat", "system"]
+    assert settings_module.pdf_application("acrobat") == Path("/Applications/Adobe Acrobat DC/Adobe Acrobat.app")
+
+
+def test_uninstalled_viewers_are_not_offered(monkeypatch):
+    monkeypatch.setattr(settings_module.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(settings_module.shutil, "which", lambda _name: None)
+    assert settings_module.available_pdf_viewers() == ["auto", "system"]
+
+
 @pytest.mark.parametrize("raw, message", [
     ({"command": "rm -rf ~"}, "unknown setting"),
     ({"rules": [{"pattern": "*.pdf", "opener": "sh -c evil"}]}, "rule opener"),

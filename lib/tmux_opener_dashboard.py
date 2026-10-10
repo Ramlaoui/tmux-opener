@@ -374,6 +374,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
     def _settings_payload(self) -> dict[str, object]:
         settings, error = opener_settings.load()
         return {"ok": True, "settings": settings, "error": error, "path": str(opener_settings.settings_path()),
+                "available_pdf_viewers": opener_settings.available_pdf_viewers(),
                 "preview_suffixes": sorted(opener_settings.PREVIEW_SUFFIXES)}
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API

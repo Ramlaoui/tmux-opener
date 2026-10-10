@@ -10,13 +10,20 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import platform
+import shutil
 import tempfile
 from pathlib import Path
 
 
 OPENERS = ("vscode", "preview", "download")
 WINDOW_POLICIES = ("new", "reuse")
-PDF_VIEWERS = ("auto", "zathura", "skim", "system")
+PDF_VIEWERS = ("auto", "zathura", "skim", "sioyek", "acrobat", "system")
+PDF_APPLICATIONS = {
+    "skim": ("Skim.app",),
+    "sioyek": ("sioyek.app", "Sioyek.app"),
+    "acrobat": ("Adobe Acrobat DC/Adobe Acrobat.app", "Adobe Acrobat.app"),
+}
 MAX_RULES = 64
 # Local previews hand a copied file to the desktop's default application.
 # Formats that can execute code when opened (scripts, .command, HTML, SVG,
@@ -32,6 +39,35 @@ DEFAULTS: dict[str, object] = {
     "vscode_file_window": "new",
     "pdf_viewer": "auto",
 }
+
+
+def pdf_application(viewer: str) -> Path | None:
+    if platform.system() != "Darwin":
+        return None
+    for root in (Path("/Applications"), Path.home() / "Applications"):
+        for name in PDF_APPLICATIONS.get(viewer, ()):
+            application = root / name
+            if application.is_dir():
+                return application
+    return None
+
+
+def sioyek_executable() -> str | None:
+    executable = shutil.which("sioyek")
+    if executable:
+        return executable
+    application = pdf_application("sioyek")
+    bundled = application / "Contents/MacOS/sioyek" if application else None
+    return str(bundled) if bundled and os.access(bundled, os.X_OK) else None
+
+
+def available_pdf_viewers() -> list[str]:
+    return [viewer for viewer in PDF_VIEWERS if (
+        viewer in {"auto", "system"}
+        or (viewer == "zathura" and shutil.which("zathura"))
+        or (viewer == "sioyek" and sioyek_executable())
+        or pdf_application(viewer)
+    )]
 
 
 def settings_path() -> Path:

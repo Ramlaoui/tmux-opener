@@ -321,7 +321,10 @@ always open in VS Code:
 
 Patterns are case-insensitive shell globs; a pattern without `/` matches the
 file name, otherwise the full remote path. `pdf_viewer` is `auto`, `zathura`,
-`skim` or `system`; window policies are `new` or `reuse`. Command-line flags
+`skim`, `sioyek`, `acrobat` or `system`; the dashboards offer installed viewers.
+Sioyek refreshes without taking focus. Acrobat on macOS reopens the matching PDF
+at the same page and zoom, and refuses to refresh unsaved edits.
+Window policies are `new` or `reuse`. Command-line flags
 (`--vscode-file-window`, `--vscode-folder-window`, `--pdf-viewer`) and
 `TMUX_OPENER_PDF_VIEWER` override the file.
 

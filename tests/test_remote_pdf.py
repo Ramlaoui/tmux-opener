@@ -25,6 +25,9 @@ def preview(tmp_path, monkeypatch):
     state = {"pdf": b"%PDF-1.7\nfirst build", "returncode": 0}
 
     def transfer(command, **kwargs):
+        if "--execute-command" in command:
+            calls.append(("reload", command))
+            return SimpleNamespace(returncode=state.get("reload_returncode", 0), stderr=b"reload failed")
         if command[0] == "osascript":
             calls.append(("reload", command))
             return SimpleNamespace(returncode=state.get("reload_returncode", 0), stderr=b"reload failed")
@@ -146,6 +149,70 @@ def test_auto_viewer_on_mac_reloads_skim(preview, monkeypatch):
     client["dispatch"]({**request, "refresh": True}, args)
     assert calls[1][1][:3] == ["open", "-a", "Skim"]
     assert len([call for call in calls if call[0] == "reload"]) == 1
+
+
+def test_sioyek_targets_the_same_file_and_reloads_without_focus(preview, monkeypatch):
+    client, args, request, calls, state, cache = preview
+    args.pdf_viewer = "sioyek"
+    monkeypatch.setattr(client["opener_settings"], "sioyek_executable", lambda: "/apps/sioyek")
+    client["dispatch"](request, args)
+    local_pdf = next(cache.rglob("document.pdf"))
+    assert calls[1] == ("viewer", ["/apps/sioyek", "--new-window", str(local_pdf)])
+    state["pdf"] = b"%PDF-1.7\nsecond build"
+    client["dispatch"]({**request, "refresh": True}, args)
+    assert calls[-1] == ("reload", ["/apps/sioyek", "--nofocus", "--new-window", str(local_pdf),
+                                    "--execute-command", "reload"])
+    assert local_pdf.read_bytes() == state["pdf"]
+    state["reload_returncode"] = 1
+    with pytest.raises(client["RequestError"], match="Sioyek reload failed"):
+        client["dispatch"]({**request, "refresh": True}, args)
+
+
+def test_acrobat_targets_cached_document_and_preserves_unsaved_edits(preview, monkeypatch):
+    client, args, request, calls, state, cache = preview
+    args.pdf_viewer = "acrobat"
+    monkeypatch.setattr(client["opener_settings"], "pdf_application", lambda _viewer: Path("/apps/Adobe Acrobat.app"))
+    client["dispatch"](request, args)
+    local_pdf = next(cache.rglob("document.pdf"))
+    assert calls[1] == ("viewer", ["open", "-a", "/apps/Adobe Acrobat.app", str(local_pdf)])
+    client["dispatch"]({**request, "refresh": True}, args)
+    command = calls[-1][1]
+    assert command[-1] == str(local_pdf)
+    script = command[2]
+    assert script.index("if modified of pdfDocument") < script.index("close pdfDocument")
+    assert "file alias of pdfDocument" in script
+    assert "oldPage" in script and "oldZoom" in script
+    state["reload_returncode"] = 1
+    with pytest.raises(client["RequestError"], match="Acrobat reload failed"):
+        client["dispatch"]({**request, "refresh": True}, args)
+
+
+@pytest.mark.parametrize("viewer", ["sioyek", "acrobat"])
+def test_missing_viewer_reports_installation_error(preview, monkeypatch, viewer):
+    client, args, request, _, _, _ = preview
+    args.pdf_viewer = viewer
+    monkeypatch.setattr(client["opener_settings"], "sioyek_executable", lambda: None)
+    monkeypatch.setattr(client["opener_settings"], "pdf_application", lambda _viewer: None)
+    with pytest.raises(client["RequestError"], match="not installed"):
+        client["dispatch"](request, args)
+
+
+def test_acrobat_reports_unsaved_edits_without_a_second_open(preview, monkeypatch):
+    client, args, request, calls, _, _ = preview
+    args.pdf_viewer = "acrobat"
+    monkeypatch.setattr(client["opener_settings"], "pdf_application", lambda _viewer: Path("/apps/Adobe Acrobat.app"))
+    client["dispatch"](request, args)
+    original_run = client["subprocess"].run
+
+    def run(command, **kwargs):
+        if command[0] == "osascript":
+            return SimpleNamespace(returncode=1, stderr=b"Acrobat has unsaved edits; save them before refreshing")
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(client["subprocess"], "run", run)
+    with pytest.raises(client["RequestError"], match="Acrobat has unsaved edits"):
+        client["dispatch"]({**request, "refresh": True}, args)
+    assert len([call for call in calls if call[0] == "viewer"]) == 1
 
 
 @pytest.mark.parametrize("backend", ["launchd", "systemd-user"])

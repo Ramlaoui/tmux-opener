@@ -224,6 +224,49 @@ def open_remote_pdf(request: dict[str, object], allowed_hosts: set[str] | None, 
         raise RequestError(f"PDF transfer failed ({type(exc).__name__})") from exc
     viewer = pdf_viewer(args)
     if refresh:
+        if viewer == "sioyek":
+            executable = opener_settings.sioyek_executable()
+            if not executable:
+                raise RequestError("Sioyek is not installed")
+            try:
+                result = subprocess.run(
+                    [executable, "--nofocus", "--new-window", str(local_pdf), "--execute-command", "reload"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    timeout=5, check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RequestError(f"Sioyek reload failed ({type(exc).__name__})") from exc
+            if result.returncode:
+                raise RequestError("Sioyek reload failed")
+        if viewer == "acrobat":
+            script = '''on run argv
+if application "Adobe Acrobat" is not running then return
+tell application "Adobe Acrobat"
+    repeat with pdfDocument in (get documents)
+        if (POSIX path of (file alias of pdfDocument)) is (item 1 of argv) then
+            if modified of pdfDocument then error "Acrobat has unsaved edits; save them before refreshing" number 1
+            set pdfWindow to PDF Window 1 of pdfDocument
+            set oldPage to page number of pdfWindow
+            set oldZoom to zoom factor of pdfWindow
+            close pdfDocument saving no
+            open (POSIX file (item 1 of argv))
+            set page number of PDF Window 1 of active doc to oldPage
+            set zoom factor of PDF Window 1 of active doc to oldZoom
+            exit repeat
+        end if
+    end repeat
+end tell
+end run'''
+            try:
+                result = subprocess.run(["osascript", "-e", script, str(local_pdf)],
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.PIPE, timeout=5, check=False)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RequestError(f"Acrobat reload failed ({type(exc).__name__})") from exc
+            if result.returncode:
+                if b"Acrobat has unsaved edits" in result.stderr:
+                    raise RequestError("Acrobat has unsaved edits; save them before refreshing")
+                raise RequestError("Acrobat reload failed; allow the desktop client to control Acrobat in macOS Automation settings")
         if viewer == "skim":
             # Skim watches file objects; replacing the cache needs an explicit reload.
             script = '''on run argv
@@ -272,6 +315,16 @@ def open_local_copy(path: Path, args: argparse.Namespace) -> subprocess.Popen[by
         return launch_command(["zathura", str(path)], False, args.verbose, "PDF viewer")
     if viewer == "skim":
         return launch_command(["open", "-a", "Skim", str(path)], False, args.verbose, "PDF viewer")
+    if viewer == "sioyek":
+        executable = opener_settings.sioyek_executable()
+        if not executable:
+            raise RequestError("Sioyek is not installed")
+        return launch_command([executable, "--new-window", str(path)], False, args.verbose, "PDF viewer")
+    if viewer == "acrobat":
+        application = opener_settings.pdf_application("acrobat")
+        if application is None:
+            raise RequestError("Adobe Acrobat is not installed on this Mac")
+        return launch_command(["open", "-a", str(application), str(path)], False, args.verbose, "PDF viewer")
     open_with_system(str(path), False, args.verbose)
     return None
 
@@ -951,6 +1004,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
     if action == "get_settings":
         settings, error = opener_settings.load()
         return {"settings": settings, "error": error, "path": str(opener_settings.settings_path()),
+                "available_pdf_viewers": opener_settings.available_pdf_viewers(),
                 "preview_suffixes": sorted(opener_settings.PREVIEW_SUFFIXES)}
     if action == "set_settings":
         try:
