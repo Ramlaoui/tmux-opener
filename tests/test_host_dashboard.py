@@ -62,6 +62,21 @@ def test_remote_clients_tab_only_exposes_its_connected_desktop():
     assert len(entries) == 1 and entries[0]["socket"] == "/tmp/forwarded.sock"
 
 
+def test_client_selection_stays_with_socket_when_rows_reorder(monkeypatch):
+    first = {"host": "first", "socket": "/tmp/first.sock", "online": True, "can_restart": True,
+             "client_info": {"instance_id": "first-instance"}}
+    second = {"host": "second", "socket": "/tmp/second.sock", "online": True, "can_restart": True,
+              "client_info": {"instance_id": "second-instance"}}
+    calls = []
+    snapshots = iter([{**status_response(), "clients": [first, second]},
+                      {**status_response(), "clients": [second, first]}])
+    monkeypatch.setattr(dashboard, "request_local_status", lambda *args, **kwargs: next(snapshots, {**status_response(), "clients": [second, first]}))
+    monkeypatch.setattr(dashboard, "send_request", lambda path, payload, timeout: calls.append(path) or {"ok": True, "restart_accepted": True})
+    screen = FakeScreen(height=24, width=100, keys=[9, curses.KEY_DOWN, ord("r"), ord("r"), ord("q")])
+    dashboard.run_live_dashboard(screen, socket_path=None, cwd="/tmp", pane=None, ssh_host=None, timeout=1, local=True)
+    assert calls == ["/tmp/second.sock", "/tmp/second.sock"]
+
+
 def status_response() -> dict[str, object]:
     return {
         "ok": True,

@@ -911,6 +911,7 @@ def run_live_dashboard(
     selected_id: object = None
     opener_selected = 0
     client_selected = 0
+    selected_client_socket: object = None
     settings_state: dict[str, object] | None = None
     error: str | None = None
     message: str | None = None
@@ -940,6 +941,12 @@ def run_live_dashboard(
                     selected = next((i for i, item in enumerate(downloads) if item.get("id") == selected_id), min(selected, max(len(downloads) - 1, 0)))
                 selected = min(selected, max(len(downloads) - 1, 0))
                 selected_id = downloads[selected].get("id") if downloads else None
+                clients = dashboard_clients(latest, socket_path)
+                if selected_client_socket is not None:
+                    client_selected = next((index for index, client in enumerate(clients)
+                                            if client.get("socket") == selected_client_socket),
+                                           min(client_selected, max(len(clients) - 1, 0)))
+                selected_client_socket = clients[client_selected].get("socket") if clients else None
                 snapshot = latest
                 error = None
             except (OSError, ValueError, StatusError) as exc:
@@ -982,6 +989,7 @@ def run_live_dashboard(
             client_selected = min(client_selected, max(len(clients) - 1, 0))
             if clients and key in (curses.KEY_UP, ord("k"), curses.KEY_DOWN, ord("j")):
                 client_selected = (client_selected + (-1 if key in (curses.KEY_UP, ord("k")) else 1)) % len(clients)
+                selected_client_socket = clients[client_selected].get("socket")
             elif clients and key in (ord("r"), ord("R")):
                 targets = [clients[client_selected]] if key == ord("r") else [client for client in clients if client.get("can_restart") is True]
                 message = restart_dashboard_clients(targets, timeout)
