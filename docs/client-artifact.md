@@ -107,6 +107,15 @@ retry controls. It binds only to loopback and requires the session token in the
 printed URL for API requests. `--no-browser` prints the URL; Ctrl-C stops the
 server. The page does not need an external service or web assets.
 
+In Clients, inspect each process, its socket, uptime and recent remote activity.
+Use **Restart client** or **Restart all online clients** in the browser. In the
+tmux dashboard, `Tab` selects Clients, `j`/`k` selects a process, `r` restarts
+that process and `R` restarts all online clients shown. Restart requires the
+new client protocol; offline and older clients are never signalled by these
+controls. The responding owner acknowledges first, cleans up its socket and
+transfers, then re-executes with its original options under the same supervisor.
+Active transfers become interrupted and retain partial copies for retry.
+
 For the same **prefix + `O`** shortcut in desktop tmux, add this to the local
 `.tmux.conf` (or run it directly with `tmux run-shell`):
 

@@ -31,8 +31,14 @@ The dashboard uses the version 1 `get_status` request and the same forwarded
 Unix socket as the other plugin commands. It refreshes about once per second.
 Use the arrow keys (or `j`/`k`) to select a transfer, `c` to request
 cancellation, `r` to retry a failed, cancelled, or interrupted transfer, and
-`q` to close the popup. The `--once` and `--json` modes are available for
-noninteractive checks:
+`q` to close the popup. `Tab` cycles through Transfers, Clients and Openers.
+The Clients view reports the connected desktop opener process; `r` restarts it
+and `R` restarts all online clients shown (only the bridged client in remote
+mode). Restarts preserve the client's options and native supervisor. Active
+transfers become interrupted and can be retried. A remote dashboard cannot
+restart other desktop clients.
+
+The `--once` and `--json` modes are available for noninteractive checks:
 
 ```sh
 scripts/tmux-opener-status --once

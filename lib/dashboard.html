@@ -253,7 +253,9 @@
         <div>
           <h1>Clients</h1>
           <p class="lede">Local opener clients on this desktop. A recent remote report shows activity, not an open SSH connection.</p>
+          <p class="muted">Restart interrupts active transfers; partial copies stay available for retry.</p>
         </div>
+        <button type="button" class="btn" id="restart-all-clients">Restart all online clients</button>
       </div>
       <div class="clients" id="clients"></div>
     </section>
@@ -350,6 +352,34 @@
       const setStatus = (ok, message) => {
         $("connection-error").hidden = ok;
         $("connection-error").textContent = ok ? "" : message;
+      };
+      const restartingClients = new Map();
+      const clientMessages = new Map();
+      const restartable = (client) => client.online && client.can_restart && !restartingClients.has(client.socket);
+      const restartClients = async (client) => {
+        const targets = client ? [client] : clients().filter(restartable);
+        if (!targets.length || targets.some((target) => !restartable(target))) return;
+        targets.forEach((target) => {
+          restartingClients.set(target.socket, { instance: target.client_info.instance_id, started: Date.now() });
+          clientMessages.delete(target.socket);
+        });
+        renderClients();
+        try {
+          const payload = client ? { action: "restart", socket: client.socket, instance_id: client.client_info.instance_id } : { action: "restart_all" };
+          const body = await api("/api/clients", { method: "POST", body: JSON.stringify(payload) });
+          if (!Array.isArray(body.results)) throw new Error("Invalid restart response");
+          targets.forEach((target) => {
+            const result = body.results.find((entry) => entry.socket === target.socket);
+            if (!result || result.restart_accepted !== true) {
+              restartingClients.delete(target.socket);
+              clientMessages.set(target.socket, result && result.error || "Client did not acknowledge restart");
+            }
+          });
+          await refresh();
+        } catch (error) {
+          targets.forEach((target) => { restartingClients.delete(target.socket); clientMessages.set(target.socket, error.message); });
+          renderClients();
+        }
       };
 
       /* Transfers ---------------------------------------------------- */
@@ -493,6 +523,13 @@
         title.append(el("div", "muted", client.online ? `${text(info.user, "?")}@${text(info.hostname, "?")} · ${text(info.os, "?")} · pid ${text(info.pid)}` : "Not responding"));
         head.append(title, el("span", `pill ${client.online ? "online" : "offline"}`, client.online ? "Online" : "Offline"));
         card.append(head);
+        const restart = el("button", "btn", restartingClients.has(client.socket) ? "Restarting…" : "Restart client");
+        restart.type = "button";
+        restart.disabled = !restartable(client);
+        restart.title = client.can_restart ? "Restart this client with its current configuration" : "Restart unavailable: client offline or needs an update";
+        restart.addEventListener("click", () => restartClients(client));
+        card.append(restart);
+        if (clientMessages.has(client.socket)) card.append(el("div", "muted", clientMessages.get(client.socket)));
         if (client.error) card.append(el("div", "alert bad", client.error));
         if (client.history_error) card.append(el("div", "alert warn", `Transfer history: ${client.history_error}`));
         if (client.online) card.append(kv([["Started", ago(info.started_at)], ["Last request", ago(info.last_request_at)], ["Default host", info.default_ssh_host, true]]));
@@ -528,6 +565,17 @@
       };
       const renderClients = () => {
         const list = clients();
+        list.forEach((client) => {
+          const pending = restartingClients.get(client.socket);
+          if (pending && client.online && client.client_info.instance_id !== pending.instance) {
+            restartingClients.delete(client.socket);
+            clientMessages.set(client.socket, "Restarted");
+          } else if (pending && Date.now() - pending.started > 30000) {
+            restartingClients.delete(client.socket);
+            clientMessages.set(client.socket, "Restart did not become ready; inspect the client log");
+          }
+        });
+        $("restart-all-clients").disabled = restartingClients.size > 0 || !list.some(restartable);
         $("count-clients").textContent = `${list.filter((client) => client.online).length}/${list.length}`;
         const root = $("clients");
         root.replaceChildren(...list.map(clientCard));
@@ -711,6 +759,7 @@
         try { localStorage.setItem("tmux-opener-view", view); } catch (_error) { /* optional */ }
       };
       document.querySelectorAll(".nav button").forEach((button) => button.addEventListener("click", () => show(button.dataset.view)));
+      $("restart-all-clients").addEventListener("click", () => restartClients(null));
       $("filter").addEventListener("input", (event) => { state.query = event.target.value; renderTransfers(); });
 
       const refresh = async () => {

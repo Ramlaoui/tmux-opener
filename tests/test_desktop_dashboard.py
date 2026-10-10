@@ -157,6 +157,7 @@ def test_explicit_host_selects_custom_socket_and_missing_host_is_offline(tmp_pat
             "socket": str(custom_socket),
             "online": True,
             "error": None,
+            "can_restart": False,
             "client_info": {},
             "hosts": [],
             "downloads": [],
@@ -189,6 +190,48 @@ def test_status_schema_rejects_old_and_non_boolean_clients(tmp_path: Path) -> No
     assert clients["old"]["error"] == "old client unsupported: get_status is unavailable"
     assert clients["wrong"]["online"] is False
     assert clients["wrong"]["error"] == "invalid get_status response: ok must be a boolean"
+
+
+def test_restart_api_authenticates_owner_and_scopes_bulk_actions(tmp_path: Path) -> None:
+    server, thread = _start_server(tmp_path)
+    port = server.server_address[1]
+    requests = []
+
+    def respond(payload):
+        requests.append(payload)
+        if payload["action"] == "restart_client":
+            return {"ok": True, "restart_accepted": True}
+        return {"ok": True, "can_restart": True, "client_info": {"instance_id": "current"},
+                "hosts": [], "downloads": [], "remote_localhost_forwards": []}
+
+    path = server.state_dir / "work.sock"
+    responder = UnixResponder(path, respond)
+    headers = {"Authorization": "Bearer test-token", "Origin": f"http://127.0.0.1:{port}",
+               "Content-Type": "application/json"}
+
+    def post(payload, selected_headers=None):
+        return _http(server, "POST", "/api/clients", headers if selected_headers is None else selected_headers,
+                     json.dumps(payload).encode())
+
+    try:
+        payload = {"action": "restart", "socket": str(path), "instance_id": "current"}
+        assert post(payload, {})[0] == 401
+        assert post({"action": []})[0] == 400
+        assert post({**payload, "pid": 123})[0] == 400
+        assert post(payload, {**headers, "Origin": "https://untrusted.invalid"})[0] == 403
+        assert post({**payload, "socket": str(tmp_path / "outside.sock")})[0] == 403
+        assert post({**payload, "instance_id": "old"})[0] == 409
+        assert not any(item["action"] == "restart_client" for item in requests)
+        assert post(payload)[0] == 200
+        assert [item for item in requests if item["action"] == "restart_client"] == [
+            {"version": 1, "action": "restart_client", "instance_id": "current"}]
+        (server.snippet_dir / "offline.conf").write_text("Host offline\n")
+        status, _, body = post({"action": "restart_all"})
+        assert status == 200
+        assert [entry["host"] for entry in json.loads(body)["results"]] == ["work"]
+    finally:
+        responder.close()
+        _stop_server(server, thread)
 
 
 def test_status_preserves_history_error_without_arbitrary_response_fields(tmp_path: Path) -> None:

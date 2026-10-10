@@ -151,6 +151,7 @@ def _status_entry(host: str, path: str, response: dict[str, object]) -> dict[str
         "socket": path,
         "online": online,
         "error": error,
+        "can_restart": online and response.get("can_restart") is True,
         "client_info": response.get("client_info") if isinstance(response.get("client_info"), dict) else {},
         "hosts": response.get("hosts") if isinstance(response.get("hosts"), list) else [],
         "downloads": response.get("downloads") if isinstance(response.get("downloads"), list) else [],
@@ -438,13 +439,41 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.MISDIRECTED_REQUEST, "request host is not allowed")
             return
         route = urllib.parse.urlsplit(self.path)
-        if route.path not in {"/api/action", "/api/settings"}:
+        if route.path not in {"/api/action", "/api/settings", "/api/clients"}:
             self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
             return
         if not self._api_guard(require_origin=True):
             return
         payload = self._read_action()
         if payload is None:
+            return
+        if route.path == "/api/clients":
+            action = payload.get("action")
+            if not isinstance(action, str) or (action == "restart" and set(payload) != {"action", "socket", "instance_id"}) or (
+                action == "restart_all" and set(payload) != {"action"}
+            ) or action not in {"restart", "restart_all"}:
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "unsupported client action fields")
+                return
+            snapshot = collect_status(self.server.state_dir, self.server.snippet_dir,
+                                      self.server.host_filter, self.server.socket_filter)
+            entries = snapshot["clients"]
+            if action == "restart":
+                path = payload.get("socket")
+                instance = payload.get("instance_id")
+                if not isinstance(path, str) or not isinstance(instance, str):
+                    self._send_error_json(HTTPStatus.BAD_REQUEST, "socket and instance_id must be strings")
+                    return
+                entries = [entry for entry in entries if entry["socket"] == _normalise_path(path)]
+                if not entries:
+                    self._send_error_json(HTTPStatus.FORBIDDEN, "socket is not a discovered client")
+                    return
+                if entries[0]["client_info"].get("instance_id") != instance:
+                    self._send_error_json(HTTPStatus.CONFLICT, "client instance changed; refresh before restarting")
+                    return
+            else:
+                entries = [entry for entry in entries if entry.get("can_restart") is True]
+            results = [{"socket": entry["socket"], "host": entry["host"], **restart_client(entry)} for entry in entries]
+            self._send_json({"ok": True, "results": results})
             return
         if route.path == "/api/settings":
             try:
@@ -491,6 +520,21 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         self._send_json(response, HTTPStatus.OK if response.get("ok") is True else HTTPStatus.BAD_GATEWAY)
 
 
+def restart_client(entry: dict[str, object], timeout: float = 3.0) -> dict[str, object]:
+    """Ask the selected live owner to restart itself, never signal a PID."""
+    info = entry.get("client_info")
+    if not entry.get("online") or entry.get("can_restart") is not True:
+        return _error_response("client is offline or does not support dashboard restart")
+    instance = info.get("instance_id") if isinstance(info, dict) else None
+    path = entry.get("socket")
+    if not isinstance(instance, str) or not instance or not isinstance(path, str):
+        return _error_response("client instance or socket is unavailable")
+    response = client_request(Path(path), {"action": "restart_client", "instance_id": instance}, timeout)
+    if response.get("ok") is True and response.get("restart_accepted") is not True:
+        return _error_response("client did not acknowledge restart; upgrade it first")
+    return response
+
+
 def _dashboard_url(server: _DashboardServer, token: str) -> str:
     port = server.server_address[1]
     return f"http://127.0.0.1:{port}/#token={urllib.parse.quote(token, safe='')}"
@@ -526,4 +570,4 @@ def run_dashboard(
     return 0
 
 
-__all__ = ["client_request", "collect_status", "run_dashboard"]
+__all__ = ["client_request", "collect_status", "restart_client", "run_dashboard"]
