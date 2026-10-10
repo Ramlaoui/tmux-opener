@@ -364,7 +364,8 @@ the remote host; `q` closes it. The viewer uses what the host has installed:
   5000 rows); `j`/`k`, `space`/`b`, `h`/`l`, `g`/`G` and `/` search
 - `.md`: `glow` when installed, otherwise the text viewer
 - `.json`: `jq`, otherwise Python's `json.tool`
-- images: `chafa` or `timg` when installed, otherwise file details
+- images: `chafa` or `timg` when installed, otherwise file details; in Ghostty or kitty, chafa draws real pixels
+  in a tmux window, since tmux keeps graphics out of popups
 - binary files: file type and size instead of raw bytes
 - folders: `ls -la`
 

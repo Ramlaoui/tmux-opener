@@ -47,6 +47,9 @@ WRAPPER_PAIRS = {
 PATH_LEADING_PUNCTUATION = "\"'`([{<"
 PATH_TRAILING_PUNCTUATION = "\"'`)]}>.,;:"
 MAX_GLOB_FILES = 1000
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"})
+# Terminals that draw kitty graphics through tmux with Unicode placeholders.
+PIXEL_TERMINAL_RE = re.compile(r"ghostty|kitty", re.IGNORECASE)
 
 
 def default_socket_path() -> str:
@@ -638,16 +641,34 @@ def show_inline(path: str, line: object, cwd: str) -> int:
     command = [str(Path(__file__).resolve().with_name("tmux-opener-view"))]
     if type(line) is int:
         command += ["--line", str(line)]
+    # tmux never passes graphics out of popups, so pixel images get a window.
+    pixels = Path(path).suffix.lower() in IMAGE_SUFFIXES and pixel_terminal()
+    if pixels:
+        command.append("--pixels")
     command += ["--", path]
     if sys.stdin.isatty() and sys.stdout.isatty():
+        if pixels:
+            subprocess.run(["tmux", "set", "-pq", "allow-passthrough", "on"], stderr=subprocess.DEVNULL, check=False)
         return subprocess.run(command, check=False).returncode
     # The viewer reports its own errors, so a failed popup means tmux cannot show one.
     shell_command = shlex.join(command) + " || true"
     # tmux expands #{...} and #(...) formats in directories and window names.
     cwd = cwd.replace("#", "##")
+    window = ["tmux", "new-window", "-c", cwd, "-n", (Path(path).name or "view").replace("#", "##"), shell_command]
+    if pixels:
+        # Chained so passthrough is on before the pane prints anything.
+        return subprocess.run([*window, ";", "set", "-pq", "allow-passthrough", "on"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode
     popup = subprocess.run(["tmux", "display-popup", "-E", "-w", "90%", "-h", "90%", "-d", cwd, shell_command],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     if popup.returncode:  # tmux before 3.2 has no popups
-        popup = subprocess.run(["tmux", "new-window", "-c", cwd, "-n", (Path(path).name or "view").replace("#", "##"), shell_command],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        popup = subprocess.run(window, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     return popup.returncode
+
+
+def pixel_terminal() -> bool:
+    if not os.environ.get("TMUX"):
+        return bool(PIXEL_TERMINAL_RE.search(os.environ.get("TERM", "")))
+    client = subprocess.run(["tmux", "display-message", "-p", "#{client_termname} #{client_termtype}"],
+                            capture_output=True, text=True, check=False).stdout
+    return bool(PIXEL_TERMINAL_RE.search(client))
