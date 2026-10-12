@@ -134,6 +134,18 @@ def test_view_key_needs_no_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert shown == [(str(source), None, str(tmp_path))]
 
 
+def test_pdfs_page_in_pixels_or_fall_back_to_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    paper = tmp_path / "paper.pdf"
+    paper.write_bytes(b"%PDF-1.4\n\0")
+    monkeypatch.setitem(VIEW["plan"].__globals__, "pdf_pages", lambda path, which: 3)
+    view, pager = VIEW["plan"](paper, 9, which_only("chafa", "pdftoppm", "pdftotext"), pixels=True)
+    assert (view.path, view.pages, view.page, pager) == (paper, 3, 3, None)
+
+    producer, pager = VIEW["plan"](paper, None, which_only("chafa", "pdftoppm", "pdftotext"))
+    assert producer == ["pdftotext", "-layout", str(paper), "-"] and pager[0] == "less"
+    assert "Binary file" in VIEW["plan"](paper, None, which_only())[0]
+
+
 def test_pixel_images_open_a_window_with_passthrough(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
 
@@ -148,6 +160,10 @@ def test_pixel_images_open_a_window_with_passthrough(tmp_path: Path, monkeypatch
     window = calls[-1]
     assert window[:2] == ["tmux", "new-window"] and window[-5:] == [";", "set", "-pq", "allow-passthrough", "on"]
     assert shlex.split(window[-6])[1:4] == ["--pixels", "--", str(tmp_path / "loss.png")]
+
+    calls.clear()
+    assert common.show_inline(str(tmp_path / "paper.pdf"), None, str(tmp_path)) == 0
+    assert calls[-1][1] == "new-window" and "--pixels" in calls[-1][-6]
 
     calls.clear()
     assert common.show_inline(str(tmp_path / "train.log"), None, str(tmp_path)) == 0
