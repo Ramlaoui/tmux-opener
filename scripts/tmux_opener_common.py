@@ -48,6 +48,7 @@ PATH_LEADING_PUNCTUATION = "\"'`([{<"
 PATH_TRAILING_PUNCTUATION = "\"'`)]}>.,;:"
 MAX_GLOB_FILES = 1000
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff"})
+PIXEL_SUFFIXES = IMAGE_SUFFIXES | {".pdf"}
 # Terminals that draw kitty graphics through tmux with Unicode placeholders.
 PIXEL_TERMINAL_RE = re.compile(r"ghostty|kitty", re.IGNORECASE)
 
@@ -641,8 +642,8 @@ def show_inline(path: str, line: object, cwd: str) -> int:
     command = [str(Path(__file__).resolve().with_name("tmux-opener-view"))]
     if type(line) is int:
         command += ["--line", str(line)]
-    # tmux never passes graphics out of popups, so pixel images get a window.
-    pixels = Path(path).suffix.lower() in IMAGE_SUFFIXES and pixel_terminal()
+    # tmux never passes graphics out of popups, so images and PDFs drawn in pixels get a window.
+    pixels = Path(path).suffix.lower() in PIXEL_SUFFIXES and pixel_terminal()
     if pixels:
         command.append("--pixels")
     command += ["--", path]

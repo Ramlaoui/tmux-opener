@@ -366,6 +366,9 @@ the remote host; `q` closes it. The viewer uses what the host has installed:
 - `.json`: `jq`, otherwise Python's `json.tool`
 - images: `chafa` or `timg` when installed, otherwise file details; in Ghostty or kitty, chafa draws real pixels
   in a tmux window, since tmux keeps graphics out of popups
+- `.pdf`: in Ghostty or kitty, pages drawn in pixels by `pdftoppm` and `chafa`
+  (`space`/`b` or arrows change page, `g`/`G` first/last, `path:N` opens page N);
+  otherwise the text from `pdftotext`
 - binary files: file type and size instead of raw bytes
 - folders: `ls -la`
 

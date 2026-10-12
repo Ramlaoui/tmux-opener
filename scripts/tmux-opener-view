@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import termios
 import tty
 from dataclasses import dataclass
@@ -34,6 +35,21 @@ class Table:
     name: str
     lines: list[str]
     start: int = 0
+
+
+@dataclass
+class Pdf:
+    """Pages rendered one at a time by page_pdf and drawn with kitty graphics."""
+
+    name: str
+    path: Path
+    pages: int
+    page: int = 1
+
+
+# Keys that move between PDF pages, including arrows and PgUp/PgDn.
+PAGE_STEPS = {" ": 1, "j": 1, "l": 1, "n": 1, "\x1b[B": 1, "\x1b[C": 1, "\x1b[6~": 1,
+              "b": -1, "k": -1, "h": -1, "p": -1, "\x1b[A": -1, "\x1b[D": -1, "\x1b[5~": -1}
 
 
 def prompt_text(text: str) -> str:
@@ -97,6 +113,48 @@ def table(path: Path) -> list[str] | None:
     if truncated:
         lines += ["", f"… showing the first {TABLE_ROWS} rows; open in VS Code or Preview for the rest"]
     return lines
+
+
+def pdf_pages(path: Path, which=shutil.which) -> int:
+    pdfinfo = which("pdfinfo")
+    if not pdfinfo:
+        return 0
+    info = subprocess.run([pdfinfo, str(path.absolute())], capture_output=True, text=True, check=False).stdout
+    return next((int(value) for key, _, value in (row.partition(":") for row in info.splitlines())
+                 if key == "Pages" and value.strip().isdigit()), 0)
+
+
+def read_key() -> str:
+    attributes = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin)
+        return os.read(sys.stdin.fileno(), 8).decode("utf-8", "replace")
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, attributes)
+
+
+def page_pdf(view: Pdf) -> int:
+    with tempfile.TemporaryDirectory(prefix="tmux-opener-pdf-") as folder:
+        while True:
+            columns, rows = shutil.get_terminal_size()
+            image = Path(folder, f"{view.page}.png")
+            if not image.exists():
+                subprocess.run(["pdftoppm", "-png", "-singlefile", "-scale-to", "2000", "-f", str(view.page),
+                                "-l", str(view.page), str(view.path), str(image.with_suffix(""))],
+                               stderr=subprocess.DEVNULL, check=False)
+            print("\x1b[H\x1b[2J", end="", flush=True)
+            subprocess.run(["chafa", "--format=kitty", "--passthrough=tmux", "--align=mid,mid",
+                            f"--size={columns}x{rows - 1}", str(image)], check=False)
+            status = f"{view.name}  page {view.page}/{view.pages}  space/b pages  g/G first/last  q close"
+            print(f"\x1b[{rows};1H\x1b[2m{status[:columns]}\x1b[0m", end="", flush=True)
+            page = view.page
+            while page == view.page:
+                key = read_key()
+                if key in ("q", "\x1b"):
+                    print("\x1b[H\x1b[2J\x1b[?25h", end="", flush=True)
+                    return 0
+                target = {"g": 1, "G": view.pages}.get(key, page + PAGE_STEPS.get(key, 0))
+                view.page = min(max(target, 1), view.pages)
 
 
 def page_table(screen: curses.window, view: Table) -> int:
@@ -168,9 +226,9 @@ def page_table(screen: curses.window, view: Table) -> int:
 
 
 def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[int, int] = (80, 24),
-         pixels: bool = False) -> tuple[list[str] | str | Table | None, list[str] | None]:
+         pixels: bool = False) -> tuple[list[str] | str | Table | Pdf | None, list[str] | None]:
     """Return (producer, pager): an argv or text piped into less, None when less reads the file,
-    a Table with no pager for the built-in table view, or an argv drawing to the terminal with no pager."""
+    a Table or Pdf with no pager for the built-in views, or an argv drawing to the terminal with no pager."""
 
     name = path.name or str(path)
     if path.is_dir():
@@ -187,6 +245,13 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
             return ["timg", "-pq", f"-g{columns}x{rows - 2}", str(path)], pager(name)
         return describe(path, "Install chafa or timg on this host to see images inline,\n"
                               "or use the Preview opener to open them on your desktop.", which), pager(name)
+    if suffix == ".pdf":
+        pages = pdf_pages(path, which) if pixels and which("chafa") and which("pdftoppm") else 0
+        if pages:
+            # path:N selections open at page N.
+            return Pdf(name, path.absolute(), pages, min(max(line or 1, 1), pages)), None
+        if which("pdftotext"):
+            return ["pdftotext", "-layout", str(path.absolute()), "-"], pager(name)
     if is_binary(path):
         return describe(path, "Binary file: use the Preview or Download opener to open it on your desktop.", which), pager(name)
     small = path.stat().st_size <= HIGHLIGHT_LIMIT
@@ -208,21 +273,18 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     return None, pager(name, line, numbers=bool(line)) + ["--", str(path)]
 
 
-def run(producer: list[str] | str | Table | None, pager_command: list[str] | None) -> int:
+def run(producer: list[str] | str | Table | Pdf | None, pager_command: list[str] | None) -> int:
     if isinstance(producer, Table):
         os.environ.setdefault("ESCDELAY", "25")
         return curses.wrapper(page_table, producer)
+    if isinstance(producer, Pdf):
+        return page_pdf(producer)
     if producer is None:
         return subprocess.run(pager_command, check=False).returncode
     if pager_command is None:  # pixel images: less would mangle the graphics escapes
         drawn = subprocess.run(producer, check=False).returncode
         print(f"\x1b[{shutil.get_terminal_size().lines};1H\x1b[2mPress any key to close\x1b[0m", end="", flush=True)
-        attributes = termios.tcgetattr(sys.stdin)
-        try:
-            tty.setcbreak(sys.stdin)
-            os.read(sys.stdin.fileno(), 1)
-        finally:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, attributes)
+        read_key()
         return drawn
     if isinstance(producer, str):
         viewer = subprocess.Popen(pager_command, stdin=subprocess.PIPE)
@@ -245,7 +307,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path")
     parser.add_argument("--line", type=int)
-    parser.add_argument("--pixels", action="store_true", help="draw images with kitty graphics")
+    parser.add_argument("--pixels", action="store_true", help="draw images and PDFs with kitty graphics")
     args = parser.parse_args()
     path = Path(args.path)
     try:
