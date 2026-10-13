@@ -8,14 +8,18 @@ viewer reads the path as an argument; nothing from the file is executed.
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import curses
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import termios
+import threading
+import time
 import tty
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,7 +52,12 @@ class Pdf:
 
 
 # Probing reads terminal replies that the key reader would take for key presses.
-CHAFA_PIXELS = ["chafa", "--format=kitty", "--passthrough=tmux", "--probe=off", "--align=mid,mid"]
+# chafa sends raw pixels, so upscaling and its animations flood tmux and SSH: it
+# draws one frame at the image's own size, and play() animates with PNG frames.
+CHAFA_PIXELS = ["chafa", "--format=kitty", "--passthrough=tmux", "--probe=off", "--animate=off",
+                "--exact-size=on", "--align=mid,mid"]
+ANIMATED_SUFFIXES = {".gif": "gif", ".webp": "webp"}  # ImageMagick reader prefixes
+KITTY_REPLY_RE = re.compile(r"\x1b_G[^\x1b]*\x1b\\")
 # Keys that move between PDF pages, including arrows and PgUp/PgDn.
 PAGE_STEPS = {" ": 1, "j": 1, "l": 1, "n": 1, "\x1b[B": 1, "\x1b[C": 1, "\x1b[6~": 1,
               "b": -1, "k": -1, "h": -1, "p": -1, "\x1b[A": -1, "\x1b[D": -1, "\x1b[5~": -1}
@@ -130,7 +139,7 @@ def read_key() -> str:
     attributes = termios.tcgetattr(sys.stdin)
     try:
         tty.setcbreak(sys.stdin)
-        return os.read(sys.stdin.fileno(), 8).decode("utf-8", "replace")
+        return os.read(sys.stdin.fileno(), 1024).decode("utf-8", "replace")
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, attributes)
 
@@ -156,6 +165,70 @@ def page_pdf(view: Pdf) -> int:
                     return 0
                 target = {"g": 1, "G": view.pages}.get(key, page + PAGE_STEPS.get(key, 0))
                 view.page = min(max(target, 1), view.pages)
+
+
+def kitty_png(png: bytes, keys: dict[bytes, bytes]) -> bytes:
+    """A PNG on a virtual placement as tmux-wrapped kitty commands; the terminal replies once shown."""
+
+    data = base64.standard_b64encode(png)
+    chunks = [data[start:start + 4096] for start in range(0, len(data), 4096)]
+    sequence = b""
+    for index, chunk in enumerate(chunks):
+        first = b"a=T,U=1,f=100,i=%s,c=%s,r=%s," % (keys[b"i"], keys[b"c"], keys[b"r"]) if not index else b""
+        command = b"\x1b_G" + first + b"m=%d;" % (index < len(chunks) - 1) + chunk + b"\x1b\\"
+        sequence += b"\x1bPtmux;" + command.replace(b"\x1b", b"\x1b\x1b") + b"\x1b\\"
+    return sequence
+
+
+def show(data: bytes) -> None:
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+
+def play(drawing: subprocess.Popen[bytes], path: Path, stop: threading.Event, shown: threading.Event) -> None:
+    """Pass chafa's frame through; animations instead get PNG frames under its image id.
+
+    chafa sends raw pixels, seconds of data over SSH for a single frame. Each PNG frame waits
+    for the terminal's reply to the last one, so a slow link lowers the frame rate instead of
+    queueing frames in tmux and SSH that hold back the key closing the view.
+    """
+
+    magick = shutil.which("magick")
+    reader = ANIMATED_SUFFIXES.get(path.suffix.lower())
+    if not (magick and reader):
+        for chunk in iter(lambda: drawing.stdout.read1(65536), b""):  # type: ignore[union-attr]
+            show(chunk)
+        return
+    drawn = drawing.stdout.read()  # type: ignore[union-attr]
+    source = f"{reader}:{path.absolute()}"  # the prefix keeps ImageMagick from sniffing other formats
+    with tempfile.TemporaryDirectory(prefix="tmux-opener-frames-") as folder:
+        first = Path(folder, "first.png")
+        subprocess.run([magick, f"{source}[0]", str(first)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        placement = re.search(rb"a=T,U=1,[^;]*", drawn)
+        if drawing.wait() or not placement or not first.exists():
+            show(drawn)
+            return
+        keys = dict(field.split(b"=", 1) for field in placement.group().split(b","))
+        # Keep chafa's placeholder cells but send the pixels as a PNG.
+        show(kitty_png(first.read_bytes(), keys) + re.sub(rb"\x1bPtmux;\x1b\x1b_G[^\x1b]*\x1b\x1b\\\x1b\\", b"", drawn))
+        subprocess.run([magick, source, "-coalesce", f"{folder}/%04d.png"], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, check=False)
+        delays = subprocess.run([magick, "identify", "-format", "%T\n", source], capture_output=True,
+                                text=True, check=False).stdout.split()
+        frames = sorted(Path(folder).glob("0*.png"))
+        if len(frames) < 2 or len(delays) != len(frames):
+            return
+        while True:
+            for frame, delay in zip(frames, delays):
+                due = time.monotonic() + max(int(delay), 2) / 100  # GIF delays are in centiseconds
+                shown.clear()
+                show(kitty_png(frame.read_bytes(), keys))
+                give_up = time.monotonic() + 2  # for terminals that never reply
+                while not shown.is_set() and time.monotonic() < give_up:
+                    if stop.wait(0.01):
+                        return
+                if stop.wait(max(due - time.monotonic(), 0)):
+                    return
 
 
 def page_table(screen: curses.window, view: Table) -> int:
@@ -283,16 +356,23 @@ def run(producer: list[str] | str | Table | Pdf | None, pager_command: list[str]
     if producer is None:
         return subprocess.run(pager_command, check=False).returncode
     if pager_command is None:  # pixel images: less would mangle the graphics escapes
-        # The hint goes first because animations keep drawing until a key stops them.
+        # The hint goes first so a key can stop an animation or a large image still drawing.
         print(f"\x1b[{shutil.get_terminal_size().lines};1H\x1b[2mPress any key to close\x1b[0m\x1b[H", end="", flush=True)
-        drawing = subprocess.Popen(producer, stdin=subprocess.DEVNULL)
-        read_key()
-        if drawing.poll() is None:
+        drawing = subprocess.Popen(producer, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE)
+        stop, shown = threading.Event(), threading.Event()
+        player = threading.Thread(target=play, args=(drawing, Path(producer[-1]), stop, shown), daemon=True)
+        player.start()
+        # Kitty replies to animation frames arrive as input; anything else is a key.
+        while not KITTY_REPLY_RE.sub("", read_key()):
+            shown.set()
+        stop.set()
+        cut = drawing.poll() is None
+        if cut:
             drawing.terminate()
-            drawing.wait()
+        player.join(timeout=1)
+        if cut or player.is_alive():
             print("\x1b\\", end="", flush=True)  # end a graphics escape cut off mid-frame
-            return 0
-        return drawing.returncode
+        return 0 if cut else drawing.returncode
     if isinstance(producer, str):
         viewer = subprocess.Popen(pager_command, stdin=subprocess.PIPE)
         try:

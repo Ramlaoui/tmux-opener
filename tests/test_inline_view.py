@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import runpy
 import shlex
@@ -168,3 +169,17 @@ def test_pixel_images_open_a_window_with_passthrough(tmp_path: Path, monkeypatch
     calls.clear()
     assert common.show_inline(str(tmp_path / "train.log"), None, str(tmp_path)) == 0
     assert [call[1] for call in calls] == ["display-popup"]
+
+
+def test_pixel_view_ignores_kitty_replies_and_sends_wrapped_png_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    keys = ["\x1b_Gi=7;OK\x1b\\", "q"]
+    monkeypatch.setitem(VIEW["run"].__globals__, "read_key", lambda: keys.pop(0))
+    assert VIEW["run"](["true", "loss.png"], None) == 0
+    assert keys == []
+
+    png = bytes(range(256)) * 40
+    sequence = VIEW["kitty_png"](png, {b"i": b"7", b"c": b"30", b"r": b"10"})
+    commands = [part.replace(b"\x1b\x1b", b"\x1b") for part in sequence.split(b"\x1bPtmux;")[1:]]
+    assert commands[0].startswith(b"\x1b_Ga=T,U=1,f=100,i=7,c=30,r=10,m=1;") and b"m=0;" in commands[-1]
+    payload = b"".join(command.split(b";", 1)[1].removesuffix(b"\x1b\\\x1b\\") for command in commands)
+    assert base64.b64decode(payload) == png
