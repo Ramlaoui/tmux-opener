@@ -47,6 +47,8 @@ class Pdf:
     page: int = 1
 
 
+# Probing reads terminal replies that the key reader would take for key presses.
+CHAFA_PIXELS = ["chafa", "--format=kitty", "--passthrough=tmux", "--probe=off", "--align=mid,mid"]
 # Keys that move between PDF pages, including arrows and PgUp/PgDn.
 PAGE_STEPS = {" ": 1, "j": 1, "l": 1, "n": 1, "\x1b[B": 1, "\x1b[C": 1, "\x1b[6~": 1,
               "b": -1, "k": -1, "h": -1, "p": -1, "\x1b[A": -1, "\x1b[D": -1, "\x1b[5~": -1}
@@ -143,8 +145,7 @@ def page_pdf(view: Pdf) -> int:
                                 "-l", str(view.page), str(view.path), str(image.with_suffix(""))],
                                stderr=subprocess.DEVNULL, check=False)
             print("\x1b[H\x1b[2J", end="", flush=True)
-            subprocess.run(["chafa", "--format=kitty", "--passthrough=tmux", "--align=mid,mid",
-                            f"--size={columns}x{rows - 1}", str(image)], check=False)
+            subprocess.run([*CHAFA_PIXELS, f"--size={columns}x{rows - 1}", str(image)], check=False)
             status = f"{view.name}  page {view.page}/{view.pages}  space/b pages  g/G first/last  q close"
             print(f"\x1b[{rows};1H\x1b[2m{status[:columns]}\x1b[0m", end="", flush=True)
             page = view.page
@@ -237,12 +238,12 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     if suffix in IMAGE_SUFFIXES:
         columns, rows = size
         if pixels and which("chafa"):
-            return ["chafa", "--format=kitty", "--passthrough=tmux", "--align=mid,mid",
-                    f"--size={columns}x{rows - 1}", str(path)], None
+            return [*CHAFA_PIXELS, f"--size={columns}x{rows - 1}", str(path)], None
         if which("chafa"):
-            return ["chafa", "--format=symbols", f"--size={columns}x{rows - 2}", str(path)], pager(name)
+            # less needs a finished stream, so animations show their first frame.
+            return ["chafa", "--format=symbols", "--animate=off", f"--size={columns}x{rows - 2}", str(path)], pager(name)
         if which("timg"):
-            return ["timg", "-pq", f"-g{columns}x{rows - 2}", str(path)], pager(name)
+            return ["timg", "-pq", "--frames=1", f"-g{columns}x{rows - 2}", str(path)], pager(name)
         return describe(path, "Install chafa or timg on this host to see images inline,\n"
                               "or use the Preview opener to open them on your desktop.", which), pager(name)
     if suffix == ".pdf":
@@ -282,10 +283,16 @@ def run(producer: list[str] | str | Table | Pdf | None, pager_command: list[str]
     if producer is None:
         return subprocess.run(pager_command, check=False).returncode
     if pager_command is None:  # pixel images: less would mangle the graphics escapes
-        drawn = subprocess.run(producer, check=False).returncode
-        print(f"\x1b[{shutil.get_terminal_size().lines};1H\x1b[2mPress any key to close\x1b[0m", end="", flush=True)
+        # The hint goes first because animations keep drawing until a key stops them.
+        print(f"\x1b[{shutil.get_terminal_size().lines};1H\x1b[2mPress any key to close\x1b[0m\x1b[H", end="", flush=True)
+        drawing = subprocess.Popen(producer, stdin=subprocess.DEVNULL)
         read_key()
-        return drawn
+        if drawing.poll() is None:
+            drawing.terminate()
+            drawing.wait()
+            print("\x1b\\", end="", flush=True)  # end a graphics escape cut off mid-frame
+            return 0
+        return drawing.returncode
     if isinstance(producer, str):
         viewer = subprocess.Popen(pager_command, stdin=subprocess.PIPE)
         try:
