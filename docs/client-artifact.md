@@ -116,6 +116,14 @@ controls. The responding owner acknowledges first, cleans up its socket and
 transfers, then re-executes with its original options under the same supervisor.
 Active transfers become interrupted and retain partial copies for retry.
 
+The local dashboards can also add a bridge: **Add bridge** in the browser, or
+`a` in the terminal dashboard's Clients view, picks a concrete `Host` alias from
+`~/.ssh/config` (or `--ssh-config PATH`) and runs
+`tmux-opener install-host --start-client HOST`. The server accepts only aliases
+listed in that config and runs the CLI without a shell; the remote tmux
+dashboard never offers it, since a forwarded session must not edit the desktop's
+SSH config.
+
 For the same **prefix + `O`** shortcut in desktop tmux, add this to the local
 `.tmux.conf` (or run it directly with `tmux run-shell`):
 

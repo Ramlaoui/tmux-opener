@@ -257,6 +257,12 @@ def install_host(args: argparse.Namespace) -> Path:
     return local_socket
 
 
+def install_host_command(args: argparse.Namespace) -> None:
+    local_socket = install_host(args)
+    if args.start_client:
+        ensure_client(args, local_socket)
+
+
 def uninstall_host(args: argparse.Namespace) -> None:
     snippet_dir = Path(args.snippet_dir).expanduser()
     config_path = Path(args.ssh_config).expanduser()
@@ -854,13 +860,15 @@ def downloads(args: argparse.Namespace) -> int:
 def dashboard(args: argparse.Namespace) -> int:
     from tmux_opener_dashboard import run_dashboard
     return run_dashboard(Path(args.state_dir).expanduser(), Path(args.snippet_dir).expanduser(),
-                         args.host, Path(args.socket).expanduser() if args.socket else None, args.no_browser)
+                         args.host, Path(args.socket).expanduser() if args.socket else None, args.no_browser,
+                         Path(args.ssh_config).expanduser())
 
 
 def terminal_dashboard(args: argparse.Namespace) -> int:
     command = [sys.executable, str(REPO_ROOT / "scripts" / "tmux-opener-status"), "--local",
                "--state-dir", str(Path(args.state_dir).expanduser()),
-               "--snippet-dir", str(Path(args.snippet_dir).expanduser())]
+               "--snippet-dir", str(Path(args.snippet_dir).expanduser()),
+               "--ssh-config", str(Path(args.ssh_config).expanduser())]
     if args.host:
         command.extend(["--ssh-host", args.host])
     if args.socket:
@@ -1078,7 +1086,9 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--snippet-dir", default=default_snippet_dir())
     install.add_argument("--dry-run", action="store_true")
     install.add_argument("--force", action="store_true")
-    install.set_defaults(func=install_host)
+    install.add_argument("--start-client", action="store_true", help="also start the local client, as `ssh` does")
+    install.set_defaults(func=install_host_command, no_start_client=False, client_verbose=False,
+                         vscode_folder_window=None, vscode_file_window=None)
 
     uninstall = subcommands.add_parser("uninstall-host", help="remove managed SSH forwarding for a host")
     uninstall.add_argument("host")
@@ -1127,7 +1137,9 @@ def build_parser() -> argparse.ArgumentParser:
         view.add_argument("--snippet-dir", default=default_snippet_dir())
         if name == "downloads":
             view.add_argument("--json", action="store_true", help="print a machine-readable snapshot")
-        elif name == "dashboard":
+        else:
+            view.add_argument("--ssh-config", default=default_ssh_config(), help="SSH config listing hosts to bridge")
+        if name == "dashboard":
             view.add_argument("--no-browser", action="store_true", help="print the dashboard URL without launching a browser")
         view.set_defaults(func=handler)
 

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import signal
 import socket
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -412,3 +415,82 @@ def test_settings_api_reads_validates_and_saves(tmp_path: Path, monkeypatch) -> 
         assert saved["rules"] == [{"pattern": "*.pdf", "opener": "preview"}]
     finally:
         _stop_server(server, thread)
+
+
+def test_ssh_config_hosts_lists_concrete_aliases_through_includes(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    ssh = home / ".ssh"
+    snippets = ssh / "tmux-opener.d"
+    (ssh / "conf.d").mkdir(parents=True)
+    snippets.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (snippets / "done.conf").write_text("Host done managed-only\n  RemoteForward /tmp/remote.sock /tmp/local.sock\n")
+    (ssh / "conf.d" / "work.conf").write_text("Host gpu\n  HostName gpu.example.org\nInclude config\n")
+    config = ssh / "config"
+    config.write_text(
+        f"Include {snippets}/*.conf\n"
+        "Include conf.d/*.conf\n"
+        "Host *\n  ServerAliveInterval 30\n"
+        'Host=cluster "login node" -oProxyCommand=x bad/name !blocked dev?\n'
+        "  HostName login.example.org\n"
+        "Match host cluster\n  HostName ignored.example.org\n"
+        "host done\n"
+        "# Host commented\n"
+    )
+
+    assert dashboard.ssh_config_hosts(config, snippets) == [
+        {"host": "cluster", "hostname": "login.example.org", "configured": False},
+        {"host": "done", "hostname": None, "configured": True},
+        {"host": "gpu", "hostname": "gpu.example.org", "configured": False},
+    ]
+
+
+def test_bridge_api_lists_ssh_hosts_and_adds_only_listed_aliases(tmp_path: Path, monkeypatch) -> None:
+    server, thread = _start_server(tmp_path)
+    server.ssh_config = tmp_path / "ssh_config"
+    server.ssh_config.write_text("Host box\n  HostName box.example.org\nHost *\n")
+    calls = []
+    monkeypatch.setattr(dashboard, "add_bridge", lambda host, *args: calls.append((host, *args)) or {"ok": True, "host": host})
+    port = server.server_address[1]
+    headers = {"Authorization": "Bearer test-token", "Origin": f"http://127.0.0.1:{port}",
+               "Content-Type": "application/json"}
+
+    def post(payload, selected_headers=None):
+        return _http(server, "POST", "/api/bridges", headers if selected_headers is None else selected_headers,
+                     json.dumps(payload).encode())[0]
+
+    try:
+        assert _http(server, "GET", "/api/ssh-hosts")[0] == 401
+        status, _, body = _http(server, "GET", "/api/ssh-hosts", {"Authorization": "Bearer test-token"})
+        assert status == 200
+        assert json.loads(body)["hosts"] == [{"host": "box", "hostname": "box.example.org", "configured": False}]
+        assert post({"host": "box"}, {}) == 401
+        assert post({"host": "box"}, {**headers, "Origin": "https://untrusted.invalid"}) == 403
+        assert post({"host": "box", "force": True}) == 400
+        assert post({"host": "*"}) == 403
+        assert post({"host": "-oProxyCommand=x"}) == 403
+        assert calls == []
+        assert post({"host": "box"}) == 200
+        assert calls == [("box", server.ssh_config, server.state_dir, server.snippet_dir)]
+    finally:
+        _stop_server(server, thread)
+
+
+def test_add_bridge_installs_the_managed_forward_and_starts_a_client() -> None:
+    # Unix socket paths are short-limited; pytest's tmp_path is too long on macOS.
+    with tempfile.TemporaryDirectory(prefix="tmo-bridge-", dir="/tmp") as directory:
+        root = Path(directory)
+        config, snippets, state = root / "config", root / "snippets", root / "state"
+        config.write_text("Host box\n  HostName 127.0.0.1\n")
+        try:
+            assert dashboard.add_bridge("box", config, state, snippets) == {"ok": True, "host": "box"}
+            assert config.read_text().startswith(f"Include {snippets}/*.conf\n")
+            assert f"RemoteForward /tmp/tmux-opener-%r.sock {state / 'box.sock'}" in (snippets / "box.conf").read_text()
+            clients = collect_status(state, snippets)["clients"]
+            assert [(client["host"], client["online"]) for client in clients] == [("box", True)]
+            assert dashboard.ssh_config_hosts(config, snippets)[0]["configured"] is True
+            assert dashboard.add_bridge("elsewhere", config, state, snippets)["ok"] is False
+        finally:
+            pid = client_request(state / "box.sock", {"action": "ping"}).get("pid")
+            if isinstance(pid, int):
+                os.kill(pid, signal.SIGTERM)

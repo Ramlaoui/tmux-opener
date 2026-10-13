@@ -441,7 +441,7 @@ def test_fake_curses_openers_view_cycles_and_saves_rules(monkeypatch: pytest.Mon
     monkeypatch.setattr(dashboard, "request_settings", lambda *args: json.loads(json.dumps(stored)))
     monkeypatch.setattr(dashboard, "save_settings", save)
     keys = [9, 9, curses.KEY_RIGHT, ord("J"), curses.KEY_UP, ord("x"), ord("q")]
-    screen = FakeScreen(height=24, width=100, keys=keys)
+    screen = FakeScreen(height=24, width=160, keys=keys)
 
     dashboard.run_live_dashboard(screen, socket_path="/tmp/status.sock", cwd="/tmp/work", pane="%9",
                                  ssh_host="cluster", timeout=0.75)
@@ -459,3 +459,26 @@ def test_folder_transfers_show_trailing_slash_and_file_count() -> None:
     text = "".join(part for part, _style in line)
     assert "exp-42/ (12 files)" in text
     assert " 50% of 100 B" in text
+
+
+def test_local_clients_view_adds_a_bridge_from_the_ssh_config_picker(monkeypatch) -> None:
+    hosts = [{"host": "alpha", "hostname": None, "configured": True},
+             {"host": "beta", "hostname": "beta.example.org", "configured": False},
+             {"host": "gamma", "hostname": None, "configured": False}]
+    calls = []
+    monkeypatch.setattr(dashboard, "request_local_status", lambda *args, **kwargs: {**status_response(), "clients": []})
+    monkeypatch.setattr(dashboard, "request_ssh_hosts", lambda ssh_config, snippet_dir: hosts)
+    monkeypatch.setattr(dashboard, "request_add_bridge", lambda host, *args: calls.append(host) or f"bridge ready for {host}")
+    # "q" filters rather than quits while picking; Esc closes the picker, then q quits.
+    keys = [9, ord("a"), ord("q"), curses.KEY_BACKSPACE, ord("m"), ord("a"), curses.KEY_DOWN, 10,
+            ord("a"), 27, ord("q")]
+    screen = FakeScreen(height=24, width=160, keys=keys)
+    dashboard.run_live_dashboard(screen, socket_path=None, cwd="/tmp", pane=None, ssh_host=None, timeout=1, local=True)
+    assert calls == ["gamma"]
+    text = "\n".join(row for frame in screen.frames for row in frame)
+    assert "ADD BRIDGE" in text and "bridge ready for gamma" in text and "a add bridge" in text
+
+    remote = FakeScreen(height=24, width=100, keys=[9, ord("a"), ord("q")])
+    monkeypatch.setattr(dashboard, "request_status", lambda *args, **kwargs: {**status_response(), "clients": []})
+    dashboard.run_live_dashboard(remote, socket_path="/tmp/remote.sock", cwd="/tmp", pane=None, ssh_host=None, timeout=1)
+    assert calls == ["gamma"] and "ADD BRIDGE" not in "\n".join(row for frame in remote.frames for row in frame)

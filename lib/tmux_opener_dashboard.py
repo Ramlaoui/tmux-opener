@@ -7,11 +7,16 @@ fragment so it is never sent to the server as part of an HTTP request.
 
 from __future__ import annotations
 
+import glob
 import json
 import os
+import re
 import secrets
+import shlex
 import socket
 import stat
+import subprocess
+import sys
 import time
 import urllib.parse
 import webbrowser
@@ -32,6 +37,13 @@ MAX_ACTION_BYTES = 64 * 1024
 DEFAULT_TIMEOUT = 3.0
 API_VERSION = 1
 ACTION_NAMES = {"cancel_download", "retry_download"}
+CLI = Path(__file__).resolve().parents[1] / "bin" / "tmux-opener"
+# Concrete aliases only: these become snippet and socket file names and a CLI
+# argument, so patterns, paths and option-like names are never offered.
+HOST_ALIAS = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._+@-]{0,254}")
+MAX_INCLUDE_DEPTH = 16
+MAX_SSH_HOSTS = 1000
+ADD_BRIDGE_TIMEOUT = 30.0
 
 
 def _utc_now() -> str:
@@ -125,6 +137,93 @@ def _candidate_sockets(state_dir: Path, snippet_dir: Path) -> list[tuple[str, st
     for host, path in configured.items():
         candidates.setdefault(path, host)
     return sorted(((host, path) for path, host in candidates.items()), key=lambda item: (item[0], item[1]))
+
+
+def default_ssh_config() -> Path:
+    return Path.home() / ".ssh" / "config"
+
+
+def _ssh_directives(path: Path, skip_dir: Path, depth: int, seen: set[Path]):
+    """Yield (keyword, arguments) from an SSH config, following Include."""
+
+    try:
+        resolved = path.resolve()
+        if depth > MAX_INCLUDE_DEPTH or resolved in seen or resolved.parent == skip_dir:
+            return
+        seen.add(resolved)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        match = re.match(r"\s*(\w+)\s*(?:=\s*|\s+)(.*)", line)
+        if not match or line.lstrip().startswith("#"):
+            continue
+        try:
+            arguments = shlex.split(match.group(2), comments=True)
+        except ValueError:
+            continue
+        keyword = match.group(1).lower()
+        if keyword != "include":
+            yield keyword, arguments
+            continue
+        for pattern in arguments:
+            pattern = os.path.expanduser(pattern)
+            if not os.path.isabs(pattern):
+                pattern = str(Path.home() / ".ssh" / pattern)
+            for included in sorted(glob.glob(pattern)):
+                yield from _ssh_directives(Path(included), skip_dir, depth + 1, seen)
+
+
+def ssh_config_hosts(ssh_config: Path, snippet_dir: Path) -> list[dict[str, object]]:
+    """List concrete Host aliases a bridge can be added for.
+
+    Wildcard and negated patterns are skipped, as are tmux-opener's own
+    managed snippets; hosts that already have one are marked configured.
+    """
+
+    snippet_dir = Path(snippet_dir).expanduser().absolute()
+    try:
+        configured = {path.stem for path in snippet_dir.glob("*.conf")}
+    except OSError:
+        configured = set()
+    hosts: dict[str, dict[str, object]] = {}
+    block: list[str] = []
+    for keyword, arguments in _ssh_directives(Path(ssh_config).expanduser(), snippet_dir.resolve(), 0, set()):
+        if keyword == "host":
+            block = [name for name in arguments if HOST_ALIAS.fullmatch(name)]
+            for name in block:
+                if len(hosts) < MAX_SSH_HOSTS:
+                    hosts.setdefault(name, {"host": name, "hostname": None, "configured": name in configured})
+        elif keyword == "match":
+            block = []
+        elif keyword == "hostname" and arguments:
+            for name in block:
+                if name in hosts and hosts[name]["hostname"] is None:
+                    hosts[name]["hostname"] = arguments[0]
+    return sorted(hosts.values(), key=lambda entry: str(entry["host"]).lower())
+
+
+def add_bridge(host: str, ssh_config: Path, state_dir: Path, snippet_dir: Path,
+               timeout: float = ADD_BRIDGE_TIMEOUT) -> dict[str, object]:
+    """Install the managed bridge for an SSH config alias and start its client."""
+
+    if not isinstance(host, str) or not any(entry["host"] == host for entry in ssh_config_hosts(ssh_config, snippet_dir)):
+        return _error_response("host is not a concrete alias in the SSH config")
+    command = [sys.executable, str(CLI), "install-host", host, "--start-client",
+               "--ssh-config", str(Path(ssh_config).expanduser()),
+               "--state-dir", str(Path(state_dir).expanduser()),
+               "--snippet-dir", str(Path(snippet_dir).expanduser())]
+    try:
+        result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return _error_response("adding the bridge timed out")
+    except OSError as exc:
+        return _error_response(f"cannot run tmux-opener: {exc}")
+    if result.returncode != 0:
+        lines = (result.stderr or result.stdout).strip().splitlines()
+        return _error_response(lines[-1] if lines else f"install-host exited with status {result.returncode}")
+    return {"ok": True, "host": host}
 
 
 def _status_entry(host: str, path: str, response: dict[str, object]) -> dict[str, object]:
@@ -283,9 +382,11 @@ class _DashboardServer(ThreadingHTTPServer):
         token: str,
         host_filter: str | None,
         socket_filter: Path | None,
+        ssh_config: Path | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser()
         self.snippet_dir = Path(snippet_dir).expanduser()
+        self.ssh_config = Path(ssh_config).expanduser() if ssh_config is not None else default_ssh_config()
         self.token = token
         self.host_filter = host_filter
         self.socket_filter = socket_filter
@@ -387,6 +488,11 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             if self._api_guard():
                 self._send_json(self._settings_payload())
             return
+        if route.path == "/api/ssh-hosts":
+            if self._api_guard():
+                self._send_json({"ok": True, "ssh_config": str(self.server.ssh_config),
+                                 "hosts": ssh_config_hosts(self.server.ssh_config, self.server.snippet_dir)})
+            return
         if route.path == "/api/status":
             if not self._api_guard():
                 return
@@ -439,13 +545,24 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.MISDIRECTED_REQUEST, "request host is not allowed")
             return
         route = urllib.parse.urlsplit(self.path)
-        if route.path not in {"/api/action", "/api/settings", "/api/clients"}:
+        if route.path not in {"/api/action", "/api/settings", "/api/clients", "/api/bridges"}:
             self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
             return
         if not self._api_guard(require_origin=True):
             return
         payload = self._read_action()
         if payload is None:
+            return
+        if route.path == "/api/bridges":
+            host = payload.get("host")
+            if set(payload) != {"host"} or not isinstance(host, str):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "host must be the only field")
+                return
+            if not any(entry["host"] == host for entry in ssh_config_hosts(self.server.ssh_config, self.server.snippet_dir)):
+                self._send_error_json(HTTPStatus.FORBIDDEN, "host is not a concrete alias in the SSH config")
+                return
+            response = add_bridge(host, self.server.ssh_config, self.server.state_dir, self.server.snippet_dir)
+            self._send_json(response, HTTPStatus.OK if response.get("ok") is True else HTTPStatus.BAD_GATEWAY)
             return
         if route.path == "/api/clients":
             action = payload.get("action")
@@ -546,11 +663,12 @@ def run_dashboard(
     host: str | None = None,
     socket_path: Path | None = None,
     no_browser: bool = False,
+    ssh_config: Path | None = None,
 ) -> int:
     """Run the loopback dashboard until Ctrl-C and return a process code."""
 
     token = secrets.token_urlsafe(32)
-    server = _DashboardServer(("127.0.0.1", 0), state_dir, snippet_dir, token, host, socket_path)
+    server = _DashboardServer(("127.0.0.1", 0), state_dir, snippet_dir, token, host, socket_path, ssh_config)
     url = _dashboard_url(server, token)
     print(url, flush=True)
     if not no_browser:
@@ -570,4 +688,4 @@ def run_dashboard(
     return 0
 
 
-__all__ = ["client_request", "collect_status", "restart_client", "run_dashboard"]
+__all__ = ["add_bridge", "client_request", "collect_status", "restart_client", "run_dashboard", "ssh_config_hosts"]
