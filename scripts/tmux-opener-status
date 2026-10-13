@@ -26,6 +26,8 @@ STATUS_STATES = {
     "queued",
     "choosing_destination",
     "downloading",
+    "choosing_files",
+    "uploading",
     "completed",
     "failed",
     "cancelled",
@@ -310,7 +312,7 @@ def snapshot_downloads(snapshot: Mapping[str, object] | None) -> list[Mapping[st
     downloads = snapshot.get("downloads") if snapshot else None
     rows = [item for item in downloads if isinstance(item, Mapping)] if isinstance(downloads, list) else []
     rows.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
-    rank = {"downloading": 0, "choosing_destination": 1, "queued": 1}
+    rank = {"downloading": 0, "uploading": 0, "choosing_destination": 1, "choosing_files": 1, "queued": 1}
     return sorted(rows, key=lambda item: rank.get(str(item.get("state")), 2))
 
 
@@ -332,6 +334,8 @@ STATE_LOOK = {
     "downloading": ("info", "run", "downloading"),
     "queued": ("warn", "wait", "queued"),
     "choosing_destination": ("warn", "wait", "choosing file"),
+    "uploading": ("info", "run", "uploading"),
+    "choosing_files": ("warn", "wait", "picking files"),
     "completed": ("good", "ok", "done"),
     "failed": ("bad", "fail", "failed"),
     "interrupted": ("bad", "fail", "interrupted"),
@@ -371,6 +375,17 @@ def _basename(value: object) -> str:
     if not path:
         return "-"
     return path.rstrip("/").rsplit("/", 1)[-1] or path
+
+
+def transfer_name(download: Mapping[str, object]) -> str:
+    """What a transfer moves: the remote file, or the files uploaded from the client."""
+
+    if download.get("kind") != "upload":
+        return _basename(download.get("path"))
+    count = _number(download.get("file_count"))
+    if count == 1 and download.get("destination"):
+        return _basename(download.get("destination"))
+    return f"{count} files" if count else "files"
 
 
 def _ago(value: object) -> str:
@@ -491,7 +506,7 @@ def _progress_bar(download: Mapping[str, object], width: int) -> Line:
         filled = min(width, received * width // size)
     else:
         filled = 0
-    style = {"completed": "good", "downloading": "info"}.get(state, "dim")
+    style = {"completed": "good", "downloading": "info", "uploading": "info"}.get(state, "dim")
     return [(GLYPHS["fill"] * filled, style), (GLYPHS["empty"] * (width - filled), "faint")]
 
 
@@ -509,7 +524,9 @@ def transfer_line(download: Mapping[str, object], width: int, selected: bool = F
     bar_width = 16 if width >= 96 else 10 if width >= 76 else 0
     fixed = 2 + 2 + 12 + (bar_width + 2 if bar_width else 0) + 19 + 13
     name_width = max(width - 1 - fixed, 10)
-    name = _basename(download.get("path"))
+    name = transfer_name(download)
+    if download.get("kind") == "upload":
+        name = f"{GLYPHS['up']} {name} {GLYPHS['arrow']} {_basename(download.get('path'))}/"
     if download.get("kind") == "folder":
         count = _number(download.get("file_count"))
         name = f"{name}/" + ("" if count is None else f" ({count} file{'' if count == 1 else 's'})")
@@ -518,7 +535,7 @@ def transfer_line(download: Mapping[str, object], width: int, selected: bool = F
     line: Line = [
         (f" {GLYPHS['select'] if selected else ' '}", "accent bold"),
         (GLYPHS[glyph] + " ", style),
-        (_clip(name, name_width).ljust(name_width), "bold" if state in ("downloading", "queued") else ""),
+        (_clip(name, name_width).ljust(name_width), "bold" if state in ("downloading", "uploading", "queued") else ""),
         ("  " + _clip(download.get("ssh_host") or "local", 10).ljust(10), "dim"),
     ]
     if bar_width:
@@ -533,14 +550,24 @@ def _detail_lines(download: Mapping[str, object] | None, width: int) -> list[Lin
     rule = GLYPHS["rule"]
     if download is None:
         return [[(" " + rule * max(width - 2, 0), "faint")], [("  no transfers yet: select a path in copy mode and press d", "dim")]]
-    title = f" {rule * 2} {_basename(download.get('path'))} "
+    title = f" {rule * 2} {transfer_name(download)} "
     state = str(download.get("state") or "")
     style, _glyph, label = STATE_LOOK.get(state, ("dim", "wait", sanitize_terminal_text(state) or "unknown"))
+    host = _optional_text(download.get("ssh_host"), "local")
+    if download.get("kind") == "upload":
+        places: list[Line] = [
+            [("  source  ", "label"), ("client: ", "accent"), (_clip(transfer_name(download), width - 20), "")],
+            [("  saved   ", "label"), (f"{host}:", "accent"),
+             (_clip_left(download.get("destination") or download.get("path"), width - 14 - len(host)), "")],
+        ]
+    else:
+        places = [
+            [("  source  ", "label"), (f"{host}:", "accent"), (_clip_left(download.get("path"), width - 14 - len(host)), "")],
+            [("  saved   ", "label"), (_clip_left(download.get("destination"), width - 12), "")],
+        ]
     lines: list[Line] = [
         [(title, "bold"), (rule * max(width - 2 - len(title), 0), "faint")],
-        [("  source  ", "label"), (f"{_optional_text(download.get('ssh_host'), 'local')}:", "accent"),
-         (_clip_left(download.get("path"), width - 14 - len(_optional_text(download.get("ssh_host"), "local"))), "")],
-        [("  saved   ", "label"), (_clip_left(download.get("destination"), width - 12), "")],
+        *places,
         [("  status  ", "label"), (label, style), (f"  {format_progress(download)}", "dim"),
          (f"  {GLYPHS['dot']} updated {_ago(download.get('updated_at'))}", "dim")],
     ]
@@ -555,7 +582,8 @@ def _detail_lines(download: Mapping[str, object] | None, width: int) -> list[Lin
 def _counts(downloads: list[Mapping[str, object]]) -> str:
     states = [str(item.get("state") or "") for item in downloads]
     parts = [
-        (sum(state in ("downloading", "queued", "choosing_destination") for state in states), "active"),
+        (sum(state in ("downloading", "uploading", "queued", "choosing_destination", "choosing_files")
+             for state in states), "active"),
         (states.count("completed"), "done"),
         (sum(state in ("failed", "interrupted") for state in states), "failed"),
     ]
@@ -1139,7 +1167,7 @@ def run_live_dashboard(
                     request_local_action(download, action, timeout)
                 else:
                     request_action(socket_path or default_socket_path(), action, download.get("id"), timeout, ssh_host)
-                message = f"{action.split('_')[0]} requested for {_basename(download.get('path'))}"
+                message = f"{action.split('_')[0]} requested for {transfer_name(download)}"
                 force_refresh = True
             except (OSError, ValueError, StatusError) as exc:
                 error = sanitize_terminal_text(exc) or "bridge unavailable"

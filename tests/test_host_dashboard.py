@@ -461,6 +461,18 @@ def test_folder_transfers_show_trailing_slash_and_file_count() -> None:
     assert " 50% of 100 B" in text
 
 
+def test_upload_transfers_show_the_files_and_remote_folder() -> None:
+    upload = {"path": "/runs/exp-42", "kind": "upload", "file_count": 1, "state": "completed",
+              "destination": "/runs/exp-42/config (1).yaml", "bytes_received": 9, "size_bytes": 9, "ssh_host": "cluster"}
+    text = "".join(part for part, _style in dashboard.transfer_line(upload, 100))
+    assert "config (1).yaml" in text and "exp-42/" in text and "done" in text
+    details = ["".join(part for part, _style in line) for line in dashboard._detail_lines(upload, 100)]
+    assert any("saved" in line and "cluster:/runs/exp-42/config (1).yaml" in line for line in details)
+    choosing = {**upload, "state": "choosing_files", "file_count": None, "destination": None}
+    text = "".join(part for part, _style in dashboard.transfer_line(choosing, 100))
+    assert "files" in text and "picking files" in text
+
+
 def test_local_clients_view_adds_a_bridge_from_the_ssh_config_picker(monkeypatch) -> None:
     hosts = [{"host": "alpha", "hostname": None, "configured": True},
              {"host": "beta", "hostname": "beta.example.org", "configured": False},

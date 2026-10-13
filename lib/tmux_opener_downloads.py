@@ -152,8 +152,11 @@ class DownloadQueue:
                 if record is None or record["state"] in TERMINAL_STATES:
                     continue
                 event = self.cancel_events[identifier]
-                record.update(state="choosing_destination" if record["ask_destination"] else "downloading",
-                              updated_at=timestamp())
+                if record.get("kind") == "upload":
+                    state = "choosing_files" if record["ask_destination"] else "uploading"
+                else:
+                    state = "choosing_destination" if record["ask_destination"] else "downloading"
+                record.update(state=state, updated_at=timestamp())
                 self._save_worker_state()
                 job = dict(record)
             last_saved = 0.0

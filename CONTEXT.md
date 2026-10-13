@@ -30,6 +30,13 @@ reported by the client. The client applies the same SSH host allowlist as remote
 editor requests and constructs the fixed SSH file-read, rsync or tar command
 itself.
 
+**Upload Request**:
+A structured request naming an absolute remote directory, usually the pane's
+working directory, to receive files from the client machine. It never names
+local files: the Local Opener Client asks the user to pick them in a local file
+dialog, then streams each over a fixed SSH command and publishes it under a
+free name without replacing remote files. Uploads share the Download Queue.
+
 **Download Queue**:
 The Local Opener Client's persistent records and bounded transfer workers. Each
 accepted download has an ID, state, byte count, destination, timestamps and

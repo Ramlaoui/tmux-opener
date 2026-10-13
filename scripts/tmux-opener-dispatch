@@ -189,6 +189,41 @@ def run_fallback(args: argparse.Namespace, selection: str, log_path: str | None)
     return 1
 
 
+def host_info(cwd: str) -> dict[str, str]:
+    return {"hostname": platform.node(), "user": getpass.getuser(), "os": platform.system(), "cwd": cwd,
+            "pane": os.environ.get("TMUX_PANE", "")}
+
+
+def upload(args: argparse.Namespace, log_path: str | None) -> int:
+    """Ask the client to upload files picked on the desktop into the pane directory."""
+
+    directory = os.path.abspath(args.cwd)
+    if not os.path.isdir(directory) or not os.access(directory, os.W_OK | os.X_OK):
+        tmux_message(f"cannot upload into {directory}: not a writable folder")
+        return 1
+    request: dict[str, object] = {"version": 1, "action": "upload_files", "path": directory,
+                                  "host_info": host_info(directory)}
+    if args.ssh_host:
+        request["ssh_host"] = args.ssh_host
+    if args.print_request:
+        print(json.dumps(request, indent=2, sort_keys=True))
+        return 0
+    if not bridge_allowed(args.bridge_policy) or not bridge_available(args.socket, args.timeout):
+        tmux_message(f"uploads require the local client bridge at {args.socket}")
+        return 1
+    try:
+        capabilities = send_request(args.socket, {"version": 1, "action": "ping"}, args.timeout).get("capabilities")
+    except (OSError, ValueError):
+        capabilities = None
+    if not isinstance(capabilities, list) or "upload_files" not in capabilities:
+        tmux_message("the local client cannot upload files; update tmux-opener on the desktop")
+        return 1
+    returncode = deliver_request(args.socket, request, args.timeout, log_path, "auto")
+    if returncode == 0:
+        route_feedback(args, f"choose files on the desktop to upload into {directory}")
+    return returncode
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("selection", nargs="?", help="text to open; defaults to stdin")
@@ -196,6 +231,7 @@ def main() -> int:
     mode.add_argument("--download", action="store_true", help="download selected files to client Downloads")
     mode.add_argument("--save-as", action="store_true", help="ask where to save each file on the client")
     mode.add_argument("--view", action="store_true", help="show the selected file inline without the bridge")
+    mode.add_argument("--upload", action="store_true", help="pick client files to upload into --cwd")
     parser.add_argument("--socket", default=default_socket_path(), help="remote forwarded Unix socket path")
     parser.add_argument("--cwd", default=os.environ.get("TMUX_OPENER_CWD") or os.getcwd())
     parser.add_argument("--ssh-host", default=default_ssh_host())
@@ -220,6 +256,9 @@ def main() -> int:
     args = parser.parse_args()
     log_path = None if args.no_log else args.log
 
+    if args.upload:
+        return upload(args, log_path)
+
     raw_selection = args.selection if args.selection is not None else sys.stdin.read()
     selection = clean_selection(raw_selection)
 
@@ -241,9 +280,7 @@ def main() -> int:
             except OSError:
                 tmux_message("a selected file disappeared or is no longer readable")
                 return 1
-            request["host_info"] = {"hostname": platform.node(), "user": getpass.getuser(),
-                                    "os": platform.system(), "cwd": args.cwd,
-                                    "pane": os.environ.get("TMUX_PANE", "")}
+            request["host_info"] = host_info(args.cwd)
         if args.print_request:
             print(json.dumps(requests, indent=2, sort_keys=True))
             return 0
