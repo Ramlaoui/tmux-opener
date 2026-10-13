@@ -828,6 +828,9 @@
         nodes.push(card("PDF viewer", "Installed viewers for previews and VimTeX output. Auto uses zathura on Linux or Skim on macOS; otherwise your system default.", [
           option("Viewer", "Sioyek reloads in the background. Acrobat reopens the PDF at the same page; unsaved edits are preserved.", segmented([["auto", "Auto"], ["zathura", "zathura"], ["skim", "Skim"], ["sioyek", "Sioyek"], ["acrobat", "Acrobat"], ["system", "System default"]].filter(([value]) => (state.settingsMeta.available_pdf_viewers || ["auto", "system"]).includes(value) || value === settings.pdf_viewer), settings.pdf_viewer, (v) => editSettings((s) => { s.pdf_viewer = v; }))),
         ]));
+        nodes.push(card("Notifications", "Desktop notifications from the client when a download or folder copy finishes. Previews opened directly are never announced.", [
+          option("Downloads", "Uses Notification Center on macOS and notify-send on Linux.", segmented([["all", "All"], ["failures", "Failures only"], ["off", "Off"]], settings.download_notifications, (v) => editSettings((s) => { s.download_notifications = v; }))),
+        ]));
 
         const bar = el("div", "panel savebar");
         const label = el("span", "state");

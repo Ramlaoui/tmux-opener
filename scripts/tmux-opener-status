@@ -342,6 +342,7 @@ SETTING_ROWS = (
     ("vscode_file_window", "VS Code files", ("new", "reuse")),
     ("vscode_folder_window", "VS Code folders", ("new", "reuse")),
     ("pdf_viewer", "PDF viewer", ("auto", "zathura", "skim", "sioyek", "acrobat", "system")),
+    ("download_notifications", "Download alerts", ("all", "failures", "off")),
 )
 
 
@@ -776,7 +777,7 @@ def render_openers_view(
     lines.append([("    ", ""), ("*  everything else".ljust(30), "dim"), ("  VS Code", "dim")])
     if not rules:
         lines.append([("    press a to add a rule such as *.log (inline), *.pdf (preview) or *.pt (download)", "dim")])
-    lines += [[], [(" WINDOWS & VIEWERS ", "label")]]
+    lines += [[], [(" WINDOWS, VIEWERS & ALERTS ", "label")]]
     for offset, (key, name, _choices) in enumerate(SETTING_ROWS):
         lines.append(row(len(rules) + offset, f"    {name}", _optional_text(settings.get(key))))
     lines += [[], [(f"   saved to {_optional_text(settings_state.get('path'))}", "faint")],

@@ -38,6 +38,7 @@ def test_uninstalled_viewers_are_not_offered(monkeypatch):
     ({"rules": [{"pattern": "*.pdf", "opener": "preview", "command": "x"}]}, "exactly a pattern"),
     ({"rules": [{"pattern": "a\nb", "opener": "preview"}]}, "single-line"),
     ({"pdf_viewer": "/usr/bin/evince"}, "pdf_viewer"),
+    ({"download_notifications": "always"}, "download_notifications"),
 ])
 def test_settings_accept_only_known_enums(raw: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
@@ -163,3 +164,26 @@ def test_inline_rule_answers_only_senders_that_can_show_popups(client: dict[str,
     client["dispatch"]({**open_request("/work/logs.log", "folder"), "inline": True}, args)
     assert opened == ["/work/train.log", "/work/logs.log"]
     assert args.download_queue.jobs == []
+
+
+@pytest.mark.parametrize("system, policy, message, expected", [
+    ("Darwin", "all", "Downloaded box:/w/a.csv to /d/a.csv", "osascript"),
+    ("Linux", "all", "Downloaded box:/w/a.csv to /d/a.csv", "notify-send"),
+    ("Darwin", "failures", "Downloaded box:/w/a.csv to /d/a.csv", None),
+    ("Linux", "failures", "Download failed for box:/w/a.csv: gone", "notify-send"),
+    ("Darwin", "off", "Download failed for box:/w/a.csv: gone", None),
+])
+def test_download_notifications_follow_the_setting(client: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+                                                   system: str, policy: str, message: str, expected: str | None) -> None:
+    settings_module.save({"download_notifications": policy}, tmp_path / "config" / "tmux-opener" / "settings.json")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    notify = client["download_notification"]
+    monkeypatch.setattr(notify.__globals__["platform"], "system", lambda: system)
+    monkeypatch.setattr(notify.__globals__["shutil"], "which", lambda name: f"/usr/bin/{name}")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(notify.__globals__["subprocess"], "run", lambda command, **_kwargs: commands.append(command))
+    notify(message)
+    assert [command[0] for command in commands] == ([expected] if expected else [])
+    if commands:
+        # The message is an argument, never part of a script or option.
+        assert commands[0][-2:] == ["tmux-opener", message]

@@ -227,7 +227,9 @@ Downloads folder; `D` opens a local save dialog for each file. Downloads run in
 the background and use the allowed SSH host. Existing files are preserved:
 `d` chooses a numbered name on collision and `D` requires a new filename.
 Completion and failures are recorded in the client log, with desktop
-notifications when `notify-send` is available.
+notifications through Notification Center on macOS or `notify-send` on Linux.
+The `download_notifications` opener setting (`all`, `failures`, `off`) controls
+them; the notification text is passed as an argument, never as script source.
 Default logs omit paths and SSH stderr; enable client `--verbose` for details.
 Downloads honor the client's `--ssh-config` and disable inherited forwarding,
 connection sharing, and local commands.
