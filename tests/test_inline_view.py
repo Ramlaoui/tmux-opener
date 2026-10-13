@@ -62,7 +62,7 @@ def test_tables_json_binary_and_images_pick_matching_viewers(tmp_path: Path) -> 
 
     image = tmp_path / "loss.png"
     image.write_bytes(b"\x89PNG\r\n\x1a\n\0")
-    assert VIEW["plan"](image, None, which_only("chafa"), (100, 30))[0][:3] == ["chafa", "--format=symbols", "--size=100x28"]
+    assert VIEW["plan"](image, None, which_only("chafa"), (100, 30))[0][:4] == ["chafa", "--format=symbols", "--animate=off", "--size=100x28"]
     assert "Install chafa" in VIEW["plan"](image, None, which_only())[0]
     producer, pager = VIEW["plan"](image, None, which_only("chafa"), (100, 30), pixels=True)
     assert producer[:3] == ["chafa", "--format=kitty", "--passthrough=tmux"] and pager is None
