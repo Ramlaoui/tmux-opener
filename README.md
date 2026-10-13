@@ -163,8 +163,9 @@ skipped, as with `rsync --safe-links`).
 Downloads run in the background over SSH using the same host alias as the bridge.
 The client needs working SSH authentication (an SSH key or agent); transfers
 cannot prompt for a password. The tmux message means the download was queued.
-Completion and errors appear in the client log and, when `notify-send` is
-available, desktop notifications. Default logs omit paths and SSH stderr;
+Completion and errors appear in the client log and as desktop notifications
+(Notification Center on macOS, `notify-send` on Linux); choose all, failures
+only or off under Openers in either dashboard. Default logs omit paths and SSH stderr;
 enable client `--verbose` for transfer details. Transfers honor the client's
 custom SSH config and disable inherited forwards and shared connections.
 Files appear at their destination only after
@@ -364,7 +365,8 @@ always open in VS Code:
   ],
   "vscode_file_window": "new",
   "vscode_folder_window": "new",
-  "pdf_viewer": "auto"
+  "pdf_viewer": "auto",
+  "download_notifications": "all"
 }
 ```
 
@@ -373,7 +375,8 @@ file name, otherwise the full remote path. `pdf_viewer` is `auto`, `zathura`,
 `skim`, `sioyek`, `acrobat` or `system`; the dashboards offer installed viewers.
 Sioyek refreshes without taking focus. Acrobat on macOS reopens the matching PDF
 at the same page and zoom, and refuses to refresh unsaved edits.
-Window policies are `new` or `reuse`. Command-line flags
+Window policies are `new` or `reuse`. `download_notifications` is `all`,
+`failures` or `off`; local previews are never announced. Command-line flags
 (`--vscode-file-window`, `--vscode-folder-window`, `--pdf-viewer`) and
 `TMUX_OPENER_PDF_VIEWER` override the file.
 

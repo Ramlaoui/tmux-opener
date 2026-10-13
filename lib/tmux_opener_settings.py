@@ -20,6 +20,7 @@ from pathlib import Path
 OPENERS = ("vscode", "tmux", "preview", "download")
 WINDOW_POLICIES = ("new", "reuse")
 PDF_VIEWERS = ("auto", "zathura", "skim", "sioyek", "acrobat", "system")
+DOWNLOAD_NOTIFICATIONS = ("all", "failures", "off")
 PDF_APPLICATIONS = {
     "skim": ("Skim.app",),
     "sioyek": ("sioyek.app", "Sioyek.app"),
@@ -39,6 +40,7 @@ DEFAULTS: dict[str, object] = {
     "vscode_folder_window": "new",
     "vscode_file_window": "new",
     "pdf_viewer": "auto",
+    "download_notifications": "all",
 }
 
 
@@ -86,7 +88,7 @@ def validate(raw: object) -> dict[str, object]:
         raise ValueError(f"unknown setting: {sorted(unknown)[0]}")
     settings = {**DEFAULTS, **raw}
     for key, choices in (("vscode_folder_window", WINDOW_POLICIES), ("vscode_file_window", WINDOW_POLICIES),
-                         ("pdf_viewer", PDF_VIEWERS)):
+                         ("pdf_viewer", PDF_VIEWERS), ("download_notifications", DOWNLOAD_NOTIFICATIONS)):
         if settings[key] not in choices:
             raise ValueError(f"{key} must be one of: {', '.join(choices)}")
     rules = settings["rules"]
