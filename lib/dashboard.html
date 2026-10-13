@@ -164,6 +164,19 @@
     .tunnel a { color: var(--accent-text); text-decoration: none; font-family: var(--mono); font-size: 12.5px; }
     .tunnel a:hover { text-decoration: underline; }
     .socket { font-family: var(--mono); font-size: 11.5px; color: var(--faint); overflow-wrap: anywhere; border-top: 1px dashed var(--line); padding-top: 10px; }
+    .head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .picker { margin-bottom: 16px; }
+    .picker[hidden] { display: none; }
+    .picker .search input { width: 100%; }
+    .picker-list { max-height: 340px; overflow: auto; margin-top: 12px; border: 1px solid var(--line); border-radius: 10px; }
+    .pick { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 9px 12px; border-top: 1px solid var(--line); }
+    .pick:first-child { border-top: 0; }
+    .pick:hover { background: color-mix(in srgb, var(--sunken) 55%, transparent); }
+    .pick .name { font-family: var(--mono); font-size: 13px; }
+    .pick .muted { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .picker-note { margin-top: 12px; }
+    .alert.good { background: var(--good-soft); color: var(--good); }
+    code { font-family: var(--mono); font-size: 12.5px; background: var(--sunken); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; }
 
     /* Openers */
     .settings { display: grid; gap: 16px; }
@@ -255,8 +268,12 @@
           <p class="lede">Local opener clients on this desktop. A recent remote report shows activity, not an open SSH connection.</p>
           <p class="muted">Restart interrupts active transfers; partial copies stay available for retry.</p>
         </div>
-        <button type="button" class="btn" id="restart-all-clients">Restart all online clients</button>
+        <div class="head-actions">
+          <button type="button" class="btn" id="restart-all-clients">Restart all online clients</button>
+          <button type="button" class="btn primary" id="add-bridge">+ Add bridge</button>
+        </div>
       </div>
+      <section class="panel picker" id="bridge-picker" hidden></section>
       <div class="clients" id="clients"></div>
     </section>
 
@@ -581,9 +598,115 @@
         root.replaceChildren(...list.map(clientCard));
         if (!list.length) {
           const empty = el("div", "panel empty");
-          empty.append(el("strong", "", "No clients configured"), el("span", "", "Run tmux-opener ssh HOST to set one up."));
+          empty.append(el("strong", "", "No clients configured"), el("span", "", "Use Add bridge to pick a host from your SSH config."));
           root.append(empty);
         }
+      };
+
+      /* Add bridge -------------------------------------------------- */
+      const picker = { open: false, hosts: null, sshConfig: "", error: null, query: "", adding: null, notice: null };
+      let pickerList = null;
+      const loadSshHosts = async () => {
+        try {
+          const body = await api("/api/ssh-hosts");
+          picker.hosts = Array.isArray(body.hosts) ? body.hosts : [];
+          picker.sshConfig = text(body.ssh_config, "");
+          picker.error = null;
+        } catch (error) {
+          picker.error = error.message;
+        }
+        renderPicker();
+      };
+      const addBridge = async (host) => {
+        if (picker.adding) return;
+        picker.adding = host;
+        picker.notice = null;
+        renderPickerList();
+        try {
+          await api("/api/bridges", { method: "POST", body: JSON.stringify({ host }) });
+          picker.notice = { ok: true, host };
+          await Promise.all([loadSshHosts(), refresh()]);
+        } catch (error) {
+          picker.notice = { ok: false, host, message: error.message };
+        } finally {
+          picker.adding = null;
+          renderPicker();
+        }
+      };
+      const renderPickerList = () => {
+        if (!pickerList) return;
+        const query = picker.query.trim().toLowerCase();
+        const hosts = (picker.hosts || []).filter((entry) => !query || [entry.host, entry.hostname].some((value) => String(value || "").toLowerCase().includes(query)));
+        // Hosts without a bridge come first; configured ones stay visible as context.
+        hosts.sort((a, b) => Number(Boolean(a.configured)) - Number(Boolean(b.configured)));
+        pickerList.replaceChildren(...hosts.map((entry) => {
+          const row = el("div", "pick");
+          const label = el("div");
+          label.style.minWidth = "0";
+          label.append(el("div", "name", entry.host));
+          if (entry.hostname && entry.hostname !== entry.host) label.append(el("div", "muted", entry.hostname));
+          row.append(label);
+          if (entry.configured) {
+            row.append(el("span", "tag", "Bridged"));
+          } else {
+            const button = el("button", "btn", picker.adding === entry.host ? "Adding…" : "Add");
+            button.type = "button";
+            button.disabled = Boolean(picker.adding);
+            button.addEventListener("click", () => addBridge(entry.host));
+            row.append(button);
+          }
+          return row;
+        }));
+        if (!hosts.length) pickerList.append(el("div", "empty", picker.hosts === null ? "Loading hosts…" : picker.hosts.length ? "No host matches" : "No concrete Host entries found"));
+      };
+      const renderPicker = () => {
+        const root = $("bridge-picker");
+        root.hidden = !picker.open;
+        $("add-bridge").textContent = picker.open ? "Close" : "+ Add bridge";
+        if (!picker.open) return;
+        const head = el("div", "card-head");
+        const label = el("div");
+        label.append(el("h2", "", "Add a bridge"), el("p", "lede", `Pick a host from ${picker.sshConfig || "your SSH config"}. tmux-opener adds its managed forward and starts the client; then a plain ssh HOST connects with the bridge.`));
+        head.append(label);
+        const body = el("div", "card-body");
+        const search = el("label", "search");
+        search.append(svg('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>', 14));
+        const input = el("input");
+        input.type = "search";
+        input.placeholder = "Filter hosts";
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.value = picker.query;
+        input.setAttribute("aria-label", "Filter SSH hosts");
+        input.addEventListener("input", () => { picker.query = input.value; renderPickerList(); });
+        input.addEventListener("keydown", (event) => {
+          if (event.key !== "Enter") return;
+          const first = pickerList && pickerList.querySelector(".pick button:not(:disabled)");
+          if (first) first.click();
+        });
+        search.append(input);
+        body.append(search);
+        if (picker.error) body.append(el("div", "alert bad picker-note", picker.error));
+        pickerList = el("div", "picker-list");
+        body.append(pickerList);
+        if (picker.notice) {
+          const note = el("div", `alert ${picker.notice.ok ? "good" : "bad"} picker-note`);
+          if (picker.notice.ok) {
+            note.append(`Bridge ready for ${picker.notice.host}. Connect with `, el("code", "", `ssh ${picker.notice.host}`), ".");
+          } else {
+            note.textContent = `${picker.notice.host}: ${picker.notice.message}`;
+          }
+          body.append(note);
+        }
+        root.replaceChildren(head, body);
+        renderPickerList();
+        if (!picker.adding) input.focus();
+      };
+      const togglePicker = (open = !picker.open) => {
+        picker.open = open;
+        picker.notice = null;
+        renderPicker();
+        if (open) loadSshHosts();
       };
 
       /* Openers ------------------------------------------------------ */
@@ -760,6 +883,7 @@
       };
       document.querySelectorAll(".nav button").forEach((button) => button.addEventListener("click", () => show(button.dataset.view)));
       $("restart-all-clients").addEventListener("click", () => restartClients(null));
+      $("add-bridge").addEventListener("click", () => togglePicker());
       $("filter").addEventListener("input", (event) => { state.query = event.target.value; renderTransfers(); });
 
       const refresh = async () => {

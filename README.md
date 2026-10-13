@@ -90,6 +90,15 @@ before changing it, starts a local `tmux-opener-client` when needed, and then
 execs `ssh HOST`. After that, ordinary `ssh HOST` inherits the same bridge from
 `~/.ssh/config`.
 
+To set up a bridge without connecting yet, pick the host from **Add bridge** on
+the Clients page of either local dashboard (see below), or run:
+
+```sh
+tmux-opener install-host --start-client HOST
+```
+
+Then connect with a plain `ssh HOST`.
+
 Preview the SSH config changes without writing files:
 
 ```sh
@@ -210,6 +219,17 @@ manages only the client reached through its forwarded bridge. Offline and older
 clients remain visible but cannot be restarted through the dashboard. Restarts
 preserve startup options and native service supervision. Active transfers are
 interrupted; retry them from Transfers to resume available partial copies.
+
+**Add bridge** on the browser Clients page, or `a` in the terminal dashboard's
+Clients view, lists the concrete `Host` aliases in `~/.ssh/config` (following
+`Include`; wildcard and negated patterns are skipped) and marks hosts that
+already have a bridge. Type to filter, then pick a host: the dashboard runs
+`tmux-opener install-host --start-client HOST`, which writes the managed snippet
+and starts the client, and you then connect with `ssh HOST`. An existing
+conflicting `RemoteForward` is reported rather than overwritten. Pass
+`--ssh-config PATH` to either dashboard to list another config. The remote tmux
+dashboard cannot add bridges: a forwarded session must not edit the desktop's
+SSH config.
 
 The desktop can use the same **prefix + `O`** shortcut. Add this to the local
 desktop's `.tmux.conf` after installing the client archive:

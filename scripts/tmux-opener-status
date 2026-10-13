@@ -36,6 +36,7 @@ DEFAULT_TIMEOUT = 3.0
 REFRESH_SECONDS = 1.0
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "tmux-opener"
 DEFAULT_SNIPPET_DIR = Path.home() / ".ssh" / "tmux-opener.d"
+DEFAULT_SSH_CONFIG = Path.home() / ".ssh" / "config"
 
 
 class StatusError(RuntimeError):
@@ -206,6 +207,28 @@ def request_local_status(
         "remote_localhost_forwards": forwards,
         "updated_at": raw.get("updated_at") if isinstance(raw, Mapping) else None,
     }
+
+
+def _local_bridge_api():
+    _local_dashboard_api()  # puts the package root on sys.path
+    from lib.tmux_opener_dashboard import add_bridge, ssh_config_hosts
+    return ssh_config_hosts, add_bridge
+
+
+def request_ssh_hosts(ssh_config: str | os.PathLike[str], snippet_dir: str | os.PathLike[str]) -> list[dict[str, object]]:
+    ssh_config_hosts, _add_bridge = _local_bridge_api()
+    return ssh_config_hosts(Path(ssh_config).expanduser(), Path(snippet_dir).expanduser())
+
+
+def request_add_bridge(host: str, ssh_config: str | os.PathLike[str], state_dir: str | os.PathLike[str],
+                       snippet_dir: str | os.PathLike[str]) -> str:
+    """Add a desktop bridge for an SSH config alias; return a status message."""
+
+    _ssh_config_hosts, add_bridge = _local_bridge_api()
+    response = add_bridge(host, Path(ssh_config).expanduser(), Path(state_dir).expanduser(), Path(snippet_dir).expanduser())
+    if response.get("ok") is not True:
+        raise StatusError(sanitize_terminal_text(response.get("error")) or "bridge was not added")
+    return f"bridge ready for {sanitize_terminal_text(host)}; connect with ssh {sanitize_terminal_text(host)}"
 
 
 def request_local_action(download: Mapping[str, object], action: str, timeout: float) -> dict[str, object]:
@@ -414,7 +437,7 @@ def _summary_lines(snapshot: Mapping[str, object], ssh_host: str | None, pane: s
                 lines.append([prefix, (GLYPHS["wait"] + " ", "dim"), (alias, "dim"),
                               (" offline: " + _optional_text(local_client.get("error")), "dim")])
         if first:
-            lines.append([_label("CLIENTS"), ("no desktop clients configured; run tmux-opener ssh HOST", "dim")])
+            lines.append([_label("CLIENTS"), ("no desktop clients configured; press a in Clients to add a bridge", "dim")])
     else:
         detail = _joined([f"{_optional_text(client.get('user'))}@{_optional_text(client.get('hostname'))}",
                           _optional_text(client.get("os")), f"pid {_optional_text(client.get('pid'))}",
@@ -641,7 +664,7 @@ def restart_dashboard_clients(clients: list[dict[str, object]], timeout: float) 
 
 
 def render_clients_view(clients: list[dict[str, object]], *, title: str, selected: int,
-                        width: int, height: int, message: str | None = None) -> list[Line]:
+                        width: int, height: int, message: str | None = None, can_add: bool = False) -> list[Line]:
     lines = [_header(title, "clients", width), _tabs("clients"), [],
              [(" CLIENTS ", "label"), (" desktop opener processes; remote reports are recent activity", "dim")], []]
     selected = min(selected, max(len(clients) - 1, 0))
@@ -658,7 +681,7 @@ def render_clients_view(clients: list[dict[str, object]], *, title: str, selecte
                       (" online  " if online else " offline ", "good" if online else "dim"),
                       (_clip(detail, max(width - 33, 0)), "")])
     if not clients:
-        lines.append([("   no desktop clients configured", "dim")])
+        lines.append([("   no desktop clients configured" + ("; press a to add a bridge" if can_add else ""), "dim")])
     else:
         client = clients[selected]
         info = client.get("client_info", {})
@@ -668,8 +691,47 @@ def render_clients_view(clients: list[dict[str, object]], *, title: str, selecte
                   [(" Activity", "label"), (" " + _ago(info.get("last_request_at")), "")]]
     lines += [[], [(" Restart interrupts transfers; retry partial copies from Transfers.", "dim")]]
     lines += [[] for _ in range(max(height - len(lines) - 1, 0))]
-    lines.append(_hints([("tab", "switch"), ("j/k", "select"), ("r", "restart"), ("R", "restart all online"), ("q", "quit")], message))
+    hints = [("tab", "switch"), ("j/k", "select"), ("r", "restart"), ("R", "restart all online")]
+    lines.append(_hints(hints + ([("a", "add bridge")] if can_add else []) + [("q", "quit")], message))
     return lines[:height]
+
+
+def picker_hosts(picker: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """Filtered SSH hosts, those without a bridge first."""
+
+    hosts = picker.get("hosts")
+    query = str(picker.get("query") or "").lower()
+    rows = [host for host in hosts if isinstance(host, Mapping)] if isinstance(hosts, list) else []
+    rows = [host for host in rows if query in str(host.get("host") or "").lower()
+            or query in str(host.get("hostname") or "").lower()]
+    return sorted(rows, key=lambda host: host.get("configured") is True)
+
+
+def render_bridge_picker(picker: Mapping[str, object], *, title: str, ssh_config: object,
+                         width: int, height: int, message: str | None = None) -> list[Line]:
+    lines: list[Line] = [_header(title, "add bridge", width), _tabs("clients"), [],
+                         [(" ADD BRIDGE ", "label"), (f" pick a host from {_optional_text(ssh_config)}", "dim")],
+                         [(" filter    ", "label"), (sanitize_terminal_text(picker.get("query")) + "_", "accent")], []]
+    hosts = picker_hosts(picker)
+    selected = min(int(picker.get("selected") or 0), max(len(hosts) - 1, 0))
+    available = max(height - len(lines) - 4, 1)
+    first = max(selected - available + 1, 0)
+    for index, host in enumerate(hosts[first:first + available], first):
+        chosen = index == selected
+        hostname = host.get("hostname")
+        line: Line = [(f" {GLYPHS['select'] if chosen else ' '} ", "accent bold"),
+                      (_clip(host.get("host"), 32).ljust(32), "dim" if host.get("configured") else "bold"),
+                      (" bridged " if host.get("configured") else "         ", "good"),
+                      (_clip(hostname if hostname and hostname != host.get("host") else "", max(width - 46, 0)), "dim")]
+        lines.append([(text, "sel") for text, _style in _pad(line, width - 1)] if chosen else line)
+    if picker.get("error"):
+        lines.append([("   " + _clip(picker.get("error"), width - 4), "warn")])
+    elif not hosts:
+        lines.append([("   " + ("no host matches" if picker.get("query") else "no concrete Host entries found"), "dim")])
+    lines += [[], [(" Adds tmux-opener's forward for the host and starts its client; then ssh HOST as usual.", "dim")]]
+    lines = lines[: max(height - 1, 0)]
+    return lines + [[] for _ in range(max(height - len(lines) - 1, 0))] + [
+        _hints([("type", "filter"), ("↑↓" if UTF8 else "^P/^N", "select"), ("enter", "add"), ("esc", "back")], message)]
 
 
 def opener_items(settings: Mapping[str, object]) -> int:
@@ -897,6 +959,7 @@ def run_live_dashboard(
     local: bool = False,
     state_dir: str | os.PathLike[str] = DEFAULT_STATE_DIR,
     snippet_dir: str | os.PathLike[str] = DEFAULT_SNIPPET_DIR,
+    ssh_config: str | os.PathLike[str] = DEFAULT_SSH_CONFIG,
     initial_snapshot: dict[str, object] | None = None,
 ) -> None:
     screen.timeout(100)
@@ -913,6 +976,8 @@ def run_live_dashboard(
     client_selected = 0
     selected_client_socket: object = None
     settings_state: dict[str, object] | None = None
+    # Desktop-only: a forwarded remote session must not edit local SSH config.
+    picker: dict[str, object] | None = None
     error: str | None = None
     message: str | None = None
     force_refresh = initial_snapshot is None
@@ -955,12 +1020,16 @@ def run_live_dashboard(
         height, width = screen.getmaxyx()
         if error:
             _display_error(screen, error, styles)
+        elif picker is not None:
+            draw(screen, render_bridge_picker(picker, title=title, ssh_config=ssh_config, width=width,
+                                              height=height, message=message), styles)
         elif view == "openers":
             draw(screen, render_openers_view(settings_state, title=title, selected=opener_selected, width=width,
                                              height=height, message=message), styles)
         elif view == "clients" and snapshot is not None:
             draw(screen, render_clients_view(dashboard_clients(snapshot, socket_path), title=title,
-                                             selected=client_selected, width=width, height=height, message=message), styles)
+                                             selected=client_selected, width=width, height=height, message=message,
+                                             can_add=local), styles)
         elif snapshot is not None:
             lines = render_transfers_view(snapshot, ssh_host=ssh_host, pane=pane, selected=selected, width=width,
                                           height=height, message=message)
@@ -969,6 +1038,34 @@ def run_live_dashboard(
 
         key = screen.getch()
         if key < 0:
+            continue
+        if picker is not None:
+            message = None
+            hosts = picker_hosts(picker)
+            if key == 27:
+                picker = None
+            elif key in (curses.KEY_UP, 16, curses.KEY_DOWN, 14) and hosts:
+                step = -1 if key in (curses.KEY_UP, 16) else 1
+                picker["selected"] = (min(int(picker.get("selected") or 0), len(hosts) - 1) + step) % len(hosts)
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                picker["query"] = str(picker.get("query") or "")[:-1]
+                picker["selected"] = 0
+            elif key in (10, 13, curses.KEY_ENTER) and hosts:
+                host = hosts[min(int(picker.get("selected") or 0), len(hosts) - 1)]
+                if host.get("configured") is True:
+                    message = f"{sanitize_terminal_text(host.get('host'))} already has a bridge"
+                    continue
+                draw(screen, render_bridge_picker(picker, title=title, ssh_config=ssh_config, width=width, height=height,
+                                                  message=f"adding {sanitize_terminal_text(host.get('host'))}…"), styles)
+                try:
+                    message = request_add_bridge(str(host.get("host")), ssh_config, state_dir, snippet_dir)
+                    picker = None
+                    force_refresh = True
+                except (OSError, ValueError, StatusError) as exc:
+                    message = f"not added: {sanitize_terminal_text(exc)}"
+            elif 32 <= key < 127:
+                picker["query"] = str(picker.get("query") or "") + chr(key)
+                picker["selected"] = 0
             continue
         if key in (ord("q"), ord("Q"), 27):
             return
@@ -994,6 +1091,11 @@ def run_live_dashboard(
                 targets = [clients[client_selected]] if key == ord("r") else [client for client in clients if client.get("can_restart") is True]
                 message = restart_dashboard_clients(targets, timeout)
                 force_refresh = True
+            elif local and key == ord("a"):
+                try:
+                    picker = {"hosts": request_ssh_hosts(ssh_config, snippet_dir), "query": "", "selected": 0}
+                except (OSError, ValueError, StatusError) as exc:
+                    picker = {"hosts": [], "query": "", "selected": 0, "error": sanitize_terminal_text(exc)}
             continue
         if view == "openers":
             settings = settings_state.get("settings") if settings_state else None
@@ -1055,6 +1157,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ssh-host", default=os.environ.get("TMUX_OPENER_SSH_HOST"), help="host alias to report")
     parser.add_argument("--state-dir", default=str(DEFAULT_STATE_DIR), help="desktop client socket state directory")
     parser.add_argument("--snippet-dir", default=str(DEFAULT_SNIPPET_DIR), help="managed SSH snippet directory")
+    parser.add_argument("--ssh-config", default=str(DEFAULT_SSH_CONFIG), help="SSH config listing hosts to bridge (local mode)")
     parser.add_argument("--cwd", default=os.environ.get("TMUX_OPENER_CWD") or os.getcwd())
     parser.add_argument("--pane", default=os.environ.get("TMUX_PANE"), help="originating tmux pane id")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT, help="socket request timeout in seconds")
@@ -1122,6 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
                 local=args.local,
                 state_dir=args.state_dir,
                 snippet_dir=args.snippet_dir,
+                ssh_config=args.ssh_config,
                 initial_snapshot=initial_snapshot,
             )
         )
