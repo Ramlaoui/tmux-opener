@@ -417,7 +417,8 @@ the remote host; `q` closes it. The viewer uses what the host has installed:
 - text: `bat` (or `batcat`) with the selected line highlighted, otherwise `less`
 - `.csv`/`.tsv`: aligned columns with the header pinned while scrolling (first
   5000 rows); `j`/`k`, `space`/`b`, `h`/`l`, `g`/`G` and `/` search
-- `.md`: `glow` when installed, otherwise the text viewer
+- `.md`: `glow` when installed, otherwise a built-in renderer (headings, lists,
+  code blocks, tables, links)
 - `.json`: `jq`, otherwise Python's `json.tool`
 - images: `chafa` or `timg` when installed, otherwise file details; in Ghostty or kitty, chafa draws real pixels
   in a tmux window, since tmux keeps graphics out of popups
@@ -425,7 +426,13 @@ the remote host; `q` closes it. The viewer uses what the host has installed:
   (`space`/`b` or arrows change page, `g`/`G` first/last, `path:N` opens page N);
   otherwise the text from `pdftotext`
 - binary files: file type and size instead of raw bytes
-- folders: `ls -la`
+- folders: a file browser with a preview pane in wide panes. `j`/`k` or arrows
+  move, Enter opens a folder or previews a file (closing the preview returns to
+  the list), `h`/`←` or the `../` row goes up, `space` marks files and folders
+  (across folders), `a` marks everything, `d` downloads the marked entries or the
+  one under the cursor (`D` asks where to save), `/` searches names, `.` shows
+  hidden files. In Ghostty or kitty, folders open in a window so previews draw
+  pixels
 
 `path:LINE` selections open at that line. Files over 20 MiB skip highlighting
 and stream through `less`. tmux older than 3.2 has no popups, so the view opens

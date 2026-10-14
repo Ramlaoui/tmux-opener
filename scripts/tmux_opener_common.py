@@ -644,8 +644,9 @@ def show_inline(path: str, line: object, cwd: str) -> int:
     command = [str(Path(__file__).resolve().with_name("tmux-opener-view"))]
     if type(line) is int:
         command += ["--line", str(line)]
-    # tmux never passes graphics out of popups, so images and PDFs drawn in pixels get a window.
-    pixels = Path(path).suffix.lower() in PIXEL_SUFFIXES and pixel_terminal()
+    # tmux never passes graphics out of popups, so images and PDFs drawn in pixels get a window,
+    # as do folders, whose browser previews them.
+    pixels = (Path(path).suffix.lower() in PIXEL_SUFFIXES or os.path.isdir(path)) and pixel_terminal()
     if pixels:
         command.append("--pixels")
     command += ["--", path]
@@ -654,7 +655,9 @@ def show_inline(path: str, line: object, cwd: str) -> int:
             subprocess.run(["tmux", "set", "-pq", "allow-passthrough", "on"], stderr=subprocess.DEVNULL, check=False)
         return subprocess.run(command, check=False).returncode
     # The viewer reports its own errors, so a failed popup means tmux cannot show one.
-    shell_command = shlex.join(command) + " || true"
+    # Popups and windows start from the server environment; the folder browser downloads with these.
+    settings = [f"{key}={value}" for key, value in os.environ.items() if key.startswith("TMUX_OPENER_")]
+    shell_command = shlex.join(["env", *settings, *command] if settings else command) + " || true"
     # tmux expands #{...} and #(...) formats in directories and window names.
     cwd = cwd.replace("#", "##")
     window = ["tmux", "new-window", "-c", cwd, "-n", (Path(path).name or "view").replace("#", "##"), shell_command]
