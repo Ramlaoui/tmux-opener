@@ -168,7 +168,7 @@ def test_tmux_plugin_key_bindings() -> None:
         assert "--target-pane #{pane_id}" not in prefix_keys
         assert "-d \"#{pane_current_path}\"" in prefix_keys
         upload = next(line for line in prefix_keys.splitlines() if "--upload" in line)
-        assert " U " in upload and "run-shell -b" in upload
+        assert " P " in upload and "run-shell -b" in upload
         assert "TMUX_OPENER_CWD=#{q:pane_current_path}" in upload
     finally:
         subprocess.run([tmux, "-L", server_name, "kill-server"], check=False)

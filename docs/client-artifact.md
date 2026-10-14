@@ -236,7 +236,7 @@ connection sharing, and local commands.
 
 ## Upload desktop files
 
-On the host, prefix + `U` asks this client to upload into the pane's current
+On the host, prefix + `P` asks this client to upload into the pane's current
 directory. The client opens a file dialog naming the host and directory; only
 the files picked there are sent. The remote request carries just the directory,
 never local paths. Each file streams over the same hardened SSH command into a
