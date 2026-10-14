@@ -183,3 +183,14 @@ def test_pixel_view_ignores_kitty_replies_and_sends_wrapped_png_frames(monkeypat
     assert commands[0].startswith(b"\x1b_Ga=T,U=1,f=100,i=7,c=30,r=10,m=1;") and b"m=0;" in commands[-1]
     payload = b"".join(command.split(b";", 1)[1].removesuffix(b"\x1b\\\x1b\\") for command in commands)
     assert base64.b64decode(payload) == png
+
+
+def test_png_files_split_a_stream_of_concatenated_pngs() -> None:
+    import io
+
+    def png(payload: bytes) -> bytes:
+        chunk = lambda kind, data: len(data).to_bytes(4, "big") + kind + data + b"crc!"  # noqa: E731
+        return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", payload) + chunk(b"IEND", b"")
+
+    first, second = png(b"IEND inside data"), png(b"x" * 300)
+    assert list(VIEW["png_files"](io.BytesIO(first + second + second[:20]))) == [first, second]
