@@ -14,6 +14,7 @@ import curses
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -59,6 +60,22 @@ class Pdf:
 CHAFA_PIXELS = ["chafa", "--format=kitty", "--passthrough=tmux", "--probe=off", "--animate=off",
                 "--exact-size=on", "--align=mid,mid"]
 KITTY_REPLY_RE = re.compile(r"\x1b_G[^\x1b]*\x1b\\")
+# Browser roles as (256-color, 8-color) foregrounds on the terminal's own background.
+COLORS = {"folder": (75, curses.COLOR_BLUE), "image": (176, curses.COLOR_MAGENTA), "pdf": (167, curses.COLOR_RED),
+          "code": (71, curses.COLOR_GREEN), "data": (172, curses.COLOR_YELLOW), "archive": (166, curses.COLOR_RED),
+          "muted": (245, curses.COLOR_WHITE), "accent": (214, curses.COLOR_YELLOW), "error": (203, curses.COLOR_RED),
+          "ok": (114, curses.COLOR_GREEN)}
+KINDS = {**dict.fromkeys(IMAGE_SUFFIXES, "image"), ".pdf": "pdf",
+         **dict.fromkeys((".py", ".ipynb", ".sh", ".js", ".ts", ".c", ".cc", ".cpp", ".h", ".rs", ".go", ".java", ".jl",
+                          ".lua", ".tex", ".toml", ".yaml", ".yml", ".cfg", ".ini"), "code"),
+         **dict.fromkeys((".csv", ".tsv", ".json", ".jsonl", ".npy", ".npz", ".pt", ".pth", ".ckpt", ".h5", ".hdf5",
+                          ".parquet", ".pkl", ".nc", ".safetensors", ".db", ".sqlite"), "data"),
+         **dict.fromkeys((".zip", ".tar", ".gz", ".tgz", ".xz", ".bz2", ".zst", ".7z"), "archive")}
+BROWSER_KEYS = [("⏎", "open"), ("←", "back"), ("␣", "mark"), ("a", "all"), ("d", "download"), ("D", "save as"),
+                ("/", "search"), (".", "hidden"), ("q", "quit")]
+# ANSI styles for render_markdown; less -R passes them through.
+MD_HEADINGS = ["\x1b[1;4;38;5;75m", "\x1b[1;38;5;75m", "\x1b[1;38;5;110m", "\x1b[1m"]
+MD_CODE, MD_MUTED, MD_RESET = "\x1b[38;5;180m", "\x1b[38;5;245m", "\x1b[0m"
 # Keys that move between PDF pages, including arrows and PgUp/PgDn.
 PAGE_STEPS = {" ": 1, "j": 1, "l": 1, "n": 1, "\x1b[B": 1, "\x1b[C": 1, "\x1b[6~": 1,
               "b": -1, "k": -1, "h": -1, "p": -1, "\x1b[A": -1, "\x1b[D": -1, "\x1b[5~": -1}
@@ -82,6 +99,14 @@ def pager(name: str, line: int | None = None, *, chop: bool = False, numbers: bo
     return command
 
 
+@dataclass
+class Folder:
+    """A directory browsed by browse_folder; pixels lets previews draw images and PDFs."""
+
+    path: Path
+    pixels: bool = False
+
+
 def human_size(size: float) -> str:
     for unit in ("B", "KiB", "MiB", "GiB"):
         if size < 1024 or unit == "GiB":
@@ -93,6 +118,75 @@ def human_size(size: float) -> str:
 def is_binary(path: Path) -> bool:
     with path.open("rb") as handle:
         return b"\0" in handle.read(8192)
+
+
+def markdown_inline(text: str) -> str:
+    parts = text.split("`")
+    if len(parts) % 2 == 0:  # an unmatched backtick: leave code spans alone
+        parts = [text]
+    for index, part in enumerate(parts):
+        if index % 2:
+            parts[index] = f"{MD_CODE}{part}\x1b[39m"
+            continue
+        part = re.sub(r"!?\[([^\]]+)\]\(([^)\s]+)[^)]*\)", lambda m: f"\x1b[4;38;5;110m{m[1]}\x1b[24;39m{MD_MUTED} ({m[2]})\x1b[39m", part)
+        part = re.sub(r"\*\*(.+?)\*\*|__(.+?)__", lambda m: f"\x1b[1m{m[1] or m[2]}\x1b[22m", part)
+        parts[index] = re.sub(r"(?<![\w*])\*(?![\s*])(.+?)(?<![\s*])\*(?![\w*])|(?<!\w)_(?![\s_])(.+?)(?<![\s_])_(?!\w)",
+                              lambda m: f"\x1b[3m{m[1] or m[2]}\x1b[23m", part)
+    return "".join(parts)
+
+
+def render_markdown(text: str, width: int) -> str:
+    """Style Markdown for less -R, one output line per source line so path:N still jumps right."""
+
+    lines, fence, table_rows, rule = [], "", [], max(min(width - 2, 40), 8)
+
+    def flush_table() -> None:
+        cells = [[cell.strip() for cell in row.strip().strip("|").split("|")] for row in table_rows]
+        rule = [all(set(cell) <= set(":- ") for cell in row) for row in cells]
+        text = [row for row, is_rule in zip(cells, rule) if not is_rule] or cells
+        widths = [max((len(row[index]) for row in text if index < len(row)), default=0)
+                  for index in range(max(map(len, cells)))]
+        for row, is_rule in zip(cells, rule):
+            if is_rule:
+                lines.append(MD_MUTED + "─┼─".join("─" * size for size in widths) + MD_RESET)
+            else:
+                padded = [markdown_inline(cell) + " " * (size - len(cell)) for cell, size in zip(row, widths)]
+                lines.append(f"{MD_MUTED} │ {MD_RESET}".join(padded).rstrip())
+        table_rows.clear()
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        if table_rows and not stripped.startswith("|"):
+            flush_table()
+        if fence:
+            if stripped.startswith(fence):
+                fence, line = "", MD_MUTED + "└" + "─" * (rule - 1) + MD_RESET
+            else:
+                line = f"{MD_MUTED}│{MD_RESET} {MD_CODE}{line}{MD_RESET}"
+        elif stripped.startswith(("```", "~~~")):
+            fence, label = stripped[:3], stripped[3:].strip()
+            line = MD_MUTED + "┌─" + (f" {label} " if label else "") + "─" * max(rule - len(label) - 4, 0) + MD_RESET
+        elif stripped.startswith("|"):
+            table_rows.append(line)
+            continue
+        elif match := re.match(r"(#{1,6})\s+(.*)", stripped):
+            line = MD_HEADINGS[min(len(match[1]), 4) - 1] + match[2].rstrip("# ") + MD_RESET
+        elif re.fullmatch(r"([-*_])( *\1){2,}", stripped):
+            line = MD_MUTED + "─" * min(width - 1, 80) + MD_RESET
+        elif match := re.match(r"(\s*)[-*+]\s+(\[[ xX]\]\s+)?(.*)", line):
+            box = {"[ ]": f"{MD_MUTED}[ ]\x1b[39m ", "[x]": "\x1b[38;5;114m[✓]\x1b[39m ",
+                   "[X]": "\x1b[38;5;114m[✓]\x1b[39m "}.get((match[2] or "").strip(), "")
+            line = f"{match[1]}\x1b[38;5;75m•\x1b[39m {box}{markdown_inline(match[3])}"
+        elif match := re.match(r"(\s*)(\d+[.)])\s+(.*)", line):
+            line = f"{match[1]}\x1b[38;5;75m{match[2]}\x1b[39m {markdown_inline(match[3])}"
+        elif stripped.startswith(">"):
+            line = f"{MD_MUTED}▌ \x1b[3m{markdown_inline(stripped.lstrip('> '))}{MD_RESET}"
+        else:
+            line = markdown_inline(line)
+        lines.append(line)
+    if table_rows:
+        flush_table()
+    return "\n".join(lines) + "\n"
 
 
 def describe(path: Path, note: str, which=shutil.which) -> str:
@@ -254,6 +348,294 @@ def play(drawing: subprocess.Popen[bytes], path: Path, stop: threading.Event, sh
             return
 
 
+def ask(screen: curses.window, label: str) -> str:
+    """Read a lowercased answer on the bottom line."""
+
+    height, width = screen.getmaxyx()
+    screen.addnstr(height - 1, 0, label.ljust(width), width - 1, curses.A_REVERSE)
+    curses.echo()
+    try:
+        curses.curs_set(1)
+    except curses.error:
+        pass
+    answer = screen.getstr(height - 1, len(label), 200).decode("utf-8", "replace").strip().lower()
+    curses.noecho()
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    return answer
+
+
+def download(paths: list[Path], folder: Path, save_as: bool) -> str:
+    """Queue downloads through the dispatcher and return its message for the status line."""
+
+    dispatch = Path(__file__).resolve().with_name("tmux-opener-dispatch")
+    # Without TMUX the dispatcher reports on stderr instead of the status line under this view.
+    env = {key: value for key, value in os.environ.items() if key != "TMUX"}
+    result = subprocess.run([str(dispatch), "--save-as" if save_as else "--download", "--cwd", str(folder)],
+                            input="\n".join(map(str, paths)), capture_output=True, text=True, env=env, check=False)
+    if result.returncode:
+        lines = result.stderr.strip().splitlines() or [f"download failed ({result.returncode})"]
+        return " " + lines[-1].removeprefix("tmux-opener: ")
+    return f" queued {len(paths)} download(s); the desktop client shows progress"
+
+
+def palette() -> dict[str, int]:
+    """Curses attributes per browser role; bold, dim and reverse stand in without colors."""
+
+    attrs = dict.fromkeys(COLORS, 0) | {"folder": curses.A_BOLD, "muted": curses.A_DIM, "accent": curses.A_BOLD,
+                                        "error": curses.A_BOLD, "cursor": curses.A_REVERSE}
+    if not curses.has_colors():
+        return attrs
+    try:
+        curses.use_default_colors()
+    except curses.error:
+        return attrs
+    rich = curses.COLORS >= 256
+    for number, (role, (color, basic)) in enumerate(COLORS.items(), 1):
+        curses.init_pair(number, color if rich else basic, -1)
+        attrs[role] = curses.color_pair(number) | (curses.A_BOLD if role == "folder" else 0)
+    curses.init_pair(len(COLORS) + 1, 255 if rich else curses.COLOR_WHITE, 24 if rich else curses.COLOR_BLUE)
+    attrs["cursor"] = curses.color_pair(len(COLORS) + 1) | curses.A_BOLD
+    return attrs
+
+
+def modified(info: os.stat_result | None) -> str:
+    if info is None:
+        return ""
+    when = time.localtime(info.st_mtime)
+    return time.strftime("%b %d %H:%M" if when.tm_year == time.localtime().tm_year else "%b %d  %Y", when)
+
+
+def peek(path: Path, info: os.stat_result | None, rows: int, attrs: dict[str, int]) -> list[tuple[str, int]]:
+    """Lines previewing a folder's entries or a file's start for the browser's right pane."""
+
+    if info is not None and stat.S_ISDIR(info.st_mode):
+        try:
+            with os.scandir(path) as scan:
+                entries = sorted(scan, key=lambda entry: (not entry.is_dir(), entry.name.lower()))
+        except OSError as exc:
+            return [(f"cannot open: {exc.strerror or exc}", attrs["error"])]
+        lines = [(f"{len(entries)} items", attrs["muted"])]
+        for entry in entries[:rows]:
+            role = "folder" if entry.is_dir() else KINDS.get(Path(entry.name).suffix.lower(), "")
+            lines.append((entry.name + ("/" if entry.is_dir() else ""), attrs.get(role, 0)))
+        return lines
+    lines = [(f"{human_size(info.st_size)} · {modified(info)}" if info else "unreadable", attrs["muted"]), ("", 0)]
+    try:
+        if path.suffix.lower() in IMAGE_SUFFIXES | {".pdf"} or is_binary(path):
+            kind = subprocess.run(["file", "-b", "--", str(path)], capture_output=True, text=True,
+                                  check=False).stdout.strip() if shutil.which("file") else ""
+            return lines + [(part.strip(), 0) for part in (kind or "binary data").split(",")[:rows - 4]] + \
+                [("", 0), ("⏎ to view", attrs["muted"])]
+        with path.open("rb") as handle:
+            text = handle.read(16384).decode("utf-8", "replace")
+    except OSError as exc:
+        return lines + [(f"cannot read: {exc.strerror or exc}", attrs["error"])]
+    return lines + [(line.expandtabs(4), 0) for line in text.splitlines()[:rows]]
+
+
+def browse_folder(screen: curses.window, view: Folder) -> int:
+    """Browse folders: Enter opens folders and previews files, space marks, d/D download."""
+
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+    attrs = palette()
+    folder, cursor, top, query, note, hidden = view.path, 0, 0, "", ("", 0), False
+    marked: dict[Path, int | None] = {}  # file sizes for the header; None for folders
+    entries: list[tuple[Path, os.stat_result | None]] = []
+    peeks: dict[Path, list[tuple[str, int]]] = {}
+
+    def is_dir(info: os.stat_result | None) -> bool:
+        return info is not None and stat.S_ISDIR(info.st_mode)
+
+    def enter(target: Path, select: Path | None = None) -> tuple[str, int]:
+        nonlocal folder, entries, cursor, top
+        rows = []
+        try:
+            with os.scandir(target) as scan:
+                for entry in scan:
+                    if entry.name.startswith(".") and not hidden:
+                        continue
+                    try:
+                        rows.append((Path(entry.path), entry.stat()))
+                    except OSError:  # broken links
+                        rows.append((Path(entry.path), None))
+        except OSError as exc:
+            return f" cannot open {target.name}: {exc.strerror or exc}", attrs["error"]
+        rows.sort(key=lambda row: (not is_dir(row[1]), row[0].name.lower()))
+        # The first row goes up, so leaving a folder is one Enter away.
+        parent = [] if target.parent == target else [(target.parent, os.stat(target.parent))]
+        folder, entries, top = target, parent + rows, 0
+        peeks.clear()
+        cursor = next((index for index, (path, _info) in enumerate(entries) if path == select), 1 if parent and rows else 0)
+        return "", 0
+
+    def find(start: int, step: int) -> int | None:
+        rows = range(start, len(entries)) if step > 0 else range(start, -1, -1)
+        return next((row for row in rows if query in entries[row][0].name.lower()), None)
+
+    def put(y: int, x: int, text: str, attr: int, limit: int) -> int:
+        try:
+            screen.addnstr(y, x, text, max(limit, 0), attr)
+        except curses.error:
+            pass
+        return x + min(len(text), max(limit, 0))
+
+    note = enter(folder)
+    while True:
+        height, width = screen.getmaxyx()
+        rows = max(1, height - 3)
+        cursor = max(0, min(cursor, len(entries) - 1))
+        top = max(min(top, cursor), cursor - rows + 1, 0)
+        split = width >= 100
+        list_width = width // 2 if split else width
+        screen.erase()
+
+        # Header: the folder, then what is marked.
+        title = str(folder).replace(str(Path.home()), "~", 1) if str(folder).startswith(str(Path.home())) else str(folder)
+        count = sum(1 for path, _info in entries if path != folder.parent)
+        if marked:
+            sizes = [size for size in marked.values() if size is not None]
+            summary = f"● {len(marked)} marked" + (f" · {human_size(sum(sizes))}" if sizes else "")
+            summary_attr = attrs["accent"] | curses.A_BOLD
+        else:
+            summary, summary_attr = f"{count} items", attrs["muted"]
+        room = max(width - len(summary) - 4, 8)
+        put(0, 1, title if len(title) <= room else "…" + title[-room + 1:], attrs["folder"], room)
+        put(0, width - len(summary) - 2, summary, summary_attr, len(summary) + 1)
+        put(1, 0, "─" * width, attrs["muted"], width)
+
+        # Entries: mark, name, size and date; the cursor row is a bar across the list.
+        date_width = 12 if list_width >= 56 else 0
+        name_width = max(8, list_width - 15 - date_width)
+        for y, (path, info) in enumerate(entries[top:top + rows], 2):
+            index = top + y - 2
+            up = path == folder.parent and index == 0 and folder.parent != folder
+            role = "folder" if is_dir(info) else KINDS.get(path.suffix.lower(), "")
+            name = "../" if up else path.name + ("/" if is_dir(info) else "")
+            if len(name) > name_width:
+                name = name[:name_width - 1] + "…"
+            size = "" if is_dir(info) or info is None else human_size(info.st_size)
+            cursor_row = index == cursor
+            base = attrs["cursor"] if cursor_row else 0
+            if cursor_row:
+                put(y, 0, " " * list_width, base, list_width)
+            x = put(y, 1, "●" if path in marked else " ", base or attrs["accent"], 1)
+            name_attr = base or (attrs["muted"] if path.name.startswith(".") or up else attrs.get(role, 0))
+            put(y, x + 1, name, name_attr, name_width)
+            put(y, 3 + name_width, f"{size:>9}", base or attrs["muted"], 9)
+            if date_width:
+                put(y, 3 + name_width + 11, modified(info) if not up else "", base or attrs["muted"], date_width)
+        if not entries or (len(entries) == 1 and entries[0][0] == folder.parent):
+            put(3 if entries else 2, 3, "empty folder", attrs["muted"], list_width - 4)
+
+        # Preview of the entry under the cursor.
+        if split and entries:
+            for y in range(2, height - 1):
+                put(y, list_width, "│", attrs["muted"], 1)
+            path, info = entries[cursor]
+            if path not in peeks:
+                peeks[path] = peek(path, info, rows, attrs)
+            for y, (line, attr) in enumerate(peeks[path][:rows], 2):
+                put(y, list_width + 2, line, attr, width - list_width - 3)
+
+        # Footer: a message, or the keys with the position on the right.
+        position = f"{cursor + 1}/{len(entries)}" if entries else ""
+        if note[0]:
+            put(height - 1, 0, note[0], note[1] | curses.A_BOLD, width - 1)
+        else:
+            x = 1
+            for key, label in BROWSER_KEYS:
+                if x + len(key) + len(label) + 3 > width - len(position) - 2:
+                    break
+                x = put(height - 1, x, key, attrs["accent"] | curses.A_BOLD, len(key))
+                x = put(height - 1, x + 1, label, attrs["muted"], len(label)) + 2
+            put(height - 1, width - len(position) - 1, position, attrs["muted"], len(position))
+        note = ("", 0)
+
+        key = screen.getch()
+        if key == 27:
+            # Graphics replies from a closed image preview start with ESC _ and must not quit.
+            screen.nodelay(True)
+            follow, previous, deadline = screen.getch(), -1, time.monotonic() + 0.5
+            while follow == ord("_") and time.monotonic() < deadline:
+                char = screen.getch()
+                if previous == 27 and char == ord("\\"):
+                    break
+                previous = char if char != -1 else previous
+                if char == -1:
+                    time.sleep(0.005)
+            screen.nodelay(False)
+            if follow == -1:
+                return 0
+            continue
+        current, info = entries[cursor] if entries else (None, None)
+        up = current == folder.parent and cursor == 0 and folder.parent != folder
+        moves = {ord("j"): 1, curses.KEY_DOWN: 1, ord("k"): -1, curses.KEY_UP: -1, curses.KEY_NPAGE: rows,
+                 curses.KEY_PPAGE: -rows, 4: rows // 2, 21: -(rows // 2)}  # Ctrl-D and Ctrl-U
+        if key in (ord("q"), ord("Q")):
+            return 0
+        if key in moves:
+            cursor += moves[key]
+        elif key in (ord("g"), curses.KEY_HOME):
+            cursor = 0
+        elif key in (ord("G"), curses.KEY_END):
+            cursor = len(entries)
+        elif key in (ord("h"), ord("-"), curses.KEY_LEFT, curses.KEY_BACKSPACE, 127, 8):
+            note = enter(folder.parent, folder)
+        elif key in (ord("l"), 10, 13, curses.KEY_ENTER, curses.KEY_RIGHT) and current:
+            if up or is_dir(info):
+                note = enter(current, folder if up else None)
+                continue
+            curses.endwin()
+            try:
+                run(*plan(current, size=tuple(shutil.get_terminal_size()), pixels=view.pixels))
+            except OSError as exc:
+                note = f" cannot show {current.name}: {exc.strerror or exc}", attrs["error"]
+            # Table previews run their own curses.wrapper, which resets modes and colors on exit.
+            curses.cbreak()
+            curses.noecho()
+            screen.keypad(True)
+            attrs = palette()
+            curses.flushinp()
+            screen.clear()
+        elif key == ord(" ") and current and not up:
+            if marked.pop(current, False) is False:
+                marked[current] = None if is_dir(info) or info is None else info.st_size
+            cursor += 1
+        elif key == ord("a"):
+            choices = {path: None if is_dir(row) or row is None else row.st_size
+                       for index, (path, row) in enumerate(entries) if not (index == 0 and path == folder.parent)}
+            if choices and choices.keys() <= marked.keys():
+                for path in choices:
+                    marked.pop(path)
+            else:
+                marked |= choices
+        elif key == ord("."):
+            hidden = not hidden
+            note = enter(folder, current)
+        elif key in (ord("d"), ord("D")) and current and (marked or not up):
+            put(height - 1, 0, " queueing…".ljust(width), attrs["muted"], width - 1)
+            screen.refresh()
+            message = download(sorted(marked) or [current], folder, key == ord("D"))
+            queued = message.startswith(" queued")
+            note = message, attrs["ok" if queued else "error"]
+            if queued:
+                marked.clear()
+        elif key == ord("/"):
+            query = ask(screen, "/")
+            if query:
+                match = find(cursor, 1)
+                cursor, note = (match, ("", 0)) if match is not None else (cursor, (f" not found: {query}", attrs["error"]))
+        elif key in (ord("n"), ord("N")) and query:
+            match = find(cursor + 1, 1) if key == ord("n") else find(cursor - 1, -1)
+            cursor, note = (match, ("", 0)) if match is not None else (cursor, (" no more matches", attrs["muted"]))
+
+
 def page_table(screen: curses.window, view: Table) -> int:
     """A small pager for tables: less-style keys, header pinned, / searches rows."""
 
@@ -302,18 +684,7 @@ def page_table(screen: curses.window, view: Table) -> int:
         elif key == ord("0"):
             left = 0
         elif key == ord("/"):
-            screen.addnstr(height - 1, 0, "/".ljust(width), width - 1, curses.A_REVERSE)
-            curses.echo()
-            try:
-                curses.curs_set(1)
-            except curses.error:
-                pass
-            query = screen.getstr(height - 1, 1, 200).decode("utf-8", "replace").strip().lower()
-            curses.noecho()
-            try:
-                curses.curs_set(0)
-            except curses.error:
-                pass
+            query = ask(screen, "/")
             if query:
                 match = find(top, 1)
                 top, note = (match, "") if match is not None else (top, f" pattern not found: {query}")
@@ -323,13 +694,13 @@ def page_table(screen: curses.window, view: Table) -> int:
 
 
 def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[int, int] = (80, 24),
-         pixels: bool = False) -> tuple[list[str] | str | Table | Pdf | None, list[str] | None]:
+         pixels: bool = False) -> tuple[list[str] | str | Table | Pdf | Folder | None, list[str] | None]:
     """Return (producer, pager): an argv or text piped into less, None when less reads the file,
-    a Table or Pdf with no pager for the built-in views, or an argv drawing to the terminal with no pager."""
+    a Table, Pdf or Folder with no pager for the built-in views, or an argv drawing to the terminal with no pager."""
 
     name = path.name or str(path)
     if path.is_dir():
-        return ["ls", "-la", str(path)], pager(name)
+        return Folder(path.absolute(), pixels), None
     suffix = path.suffix.lower()
     if suffix in IMAGE_SUFFIXES:
         columns, rows = size
@@ -360,9 +731,10 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
         if which("jq"):
             return ["jq", "-C", ".", str(path)], pager(name)
         return [sys.executable, "-m", "json.tool", str(path)], pager(name)
-    glow = which("glow")
-    if suffix in {".md", ".markdown"} and glow and small:
-        return [glow, "--style=dark", f"--width={min(size[0] - 2, 120)}", "--", str(path)], pager(name)
+    if suffix in {".md", ".markdown"} and small:
+        if glow := which("glow"):
+            return [glow, "--style=dark", f"--width={min(size[0] - 2, 120)}", "--", str(path)], pager(name)
+        return render_markdown(path.read_text(encoding="utf-8", errors="replace"), size[0]), pager(name, line)
     bat = which("bat") or which("batcat")
     if bat and small:
         highlight = ["--highlight-line", str(line)] if line else []
@@ -370,10 +742,10 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     return None, pager(name, line, numbers=bool(line)) + ["--", str(path)]
 
 
-def run(producer: list[str] | str | Table | Pdf | None, pager_command: list[str] | None) -> int:
-    if isinstance(producer, Table):
+def run(producer: list[str] | str | Table | Pdf | Folder | None, pager_command: list[str] | None) -> int:
+    if isinstance(producer, (Table, Folder)):
         os.environ.setdefault("ESCDELAY", "25")
-        return curses.wrapper(page_table, producer)
+        return curses.wrapper(page_table if isinstance(producer, Table) else browse_folder, producer)
     if isinstance(producer, Pdf):
         return page_pdf(producer)
     if producer is None:

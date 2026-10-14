@@ -50,7 +50,8 @@ def test_tables_json_binary_and_images_pick_matching_viewers(tmp_path: Path) -> 
     notes = tmp_path / "README.md"
     notes.write_text("# Notes\n")
     assert VIEW["plan"](notes, None, which_only("glow", "bat"), (100, 30))[0] == ["/usr/bin/glow", "--style=dark", "--width=98", "--", str(notes)]
-    assert VIEW["plan"](notes, None, which_only("bat"))[0][0] == "/usr/bin/bat"
+    rendered, pager = VIEW["plan"](notes, 1, which_only("bat"))
+    assert "\x1b[" in rendered and "Notes" in rendered and "# " not in rendered and "+1g" in pager
 
     data = tmp_path / "cfg.json"
     data.write_text('{"a": 1}')
@@ -68,7 +69,7 @@ def test_tables_json_binary_and_images_pick_matching_viewers(tmp_path: Path) -> 
     producer, pager = VIEW["plan"](image, None, which_only("chafa"), (100, 30), pixels=True)
     assert producer[:3] == ["chafa", "--format=kitty", "--passthrough=tmux"] and pager is None
 
-    assert VIEW["plan"](tmp_path, None, which_only())[0] == ["ls", "-la", str(tmp_path)]
+    assert VIEW["plan"](tmp_path, None, which_only())[0] == VIEW["Folder"](tmp_path.absolute(), False)
 
 
 def test_popup_runs_the_viewer_with_a_quoted_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,6 +171,15 @@ def test_pixel_images_open_a_window_with_passthrough(tmp_path: Path, monkeypatch
     assert common.show_inline(str(tmp_path / "train.log"), None, str(tmp_path)) == 0
     assert [call[1] for call in calls] == ["display-popup"]
 
+    # Folders get a window too, and the browser downloads with the plugin's settings.
+    calls.clear()
+    monkeypatch.setenv("TMUX_OPENER_SOCKET", "/run/user/7/opener.sock")
+    assert common.show_inline(str(tmp_path), None, str(tmp_path)) == 0
+    window = calls[-1]
+    assert window[1] == "new-window"
+    assert shlex.split(window[-6])[:2] == ["env", "TMUX_OPENER_SOCKET=/run/user/7/opener.sock"]
+    assert shlex.split(window[-6])[-5:] == ["--pixels", "--", str(tmp_path), "||", "true"]
+
 
 def test_pixel_view_ignores_kitty_replies_and_sends_wrapped_png_frames(monkeypatch: pytest.MonkeyPatch) -> None:
     keys = ["\x1b_Gi=7;OK\x1b\\", "q"]
@@ -194,3 +204,40 @@ def test_png_files_split_a_stream_of_concatenated_pngs() -> None:
 
     first, second = png(b"IEND inside data"), png(b"x" * 300)
     assert list(VIEW["png_files"](io.BytesIO(first + second + second[:20]))) == [first, second]
+
+
+def test_folder_browser_queues_marked_entries_on_the_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_folder_downloads import serve_bridge
+
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "a.log").write_text("a")
+    (tmp_path / "notes.txt").write_text("notes")
+    socket_path, requests, stop = tmp_path / "client.sock", [], threading.Event()
+    thread = serve_bridge(socket_path, ["download_folder"], requests, stop)
+    monkeypatch.setenv("TMUX_OPENER_SOCKET", str(socket_path))
+    monkeypatch.setenv("TMUX_OPENER_LOG", str(tmp_path / "sender.log"))
+    try:
+        note = VIEW["download"]([tmp_path / "notes.txt", tmp_path / "runs"], tmp_path, False)
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    assert note == " queued 2 download(s); the desktop client shows progress"
+    sent = [(request["action"], request["path"]) for request in requests if request["action"] != "ping"]
+    assert sent == [("download_file", str(tmp_path / "notes.txt")), ("download_folder", str(tmp_path / "runs"))]
+
+    monkeypatch.setenv("TMUX_OPENER_SOCKET", str(tmp_path / "missing.sock"))
+    assert "downloads require the local client bridge" in VIEW["download"]([tmp_path / "notes.txt"], tmp_path, False)
+
+
+def test_markdown_renders_styles_without_shifting_lines() -> None:
+    import re
+
+    source = ("# Title\n\nSome **bold**, *italic* and `code` with a [link](https://example.org).\n- [x] done\n"
+              "1. first\n> quoted\n```python\nx = 1  # not a heading\n```\n| a | bb |\n|---|---|\n| ccc | d |\n---\n")
+    rendered = VIEW["render_markdown"](source, 80)
+    plain = [re.sub(r"\x1b\[[0-9;]*m", "", line) for line in rendered.splitlines()]
+    assert len(plain) == len(source.splitlines())  # path:N lines stay in place
+    assert plain[0] == "Title" and plain[2] == "Some bold, italic and code with a link (https://example.org)."
+    assert plain[3] == "• [✓] done" and plain[4] == "1. first" and plain[5] == "▌ quoted"
+    assert plain[6].startswith("┌─ python ") and plain[7] == "│ x = 1  # not a heading" and len(plain[8]) == len(plain[6])
+    assert plain[9:12] == ["a   │ bb", "────┼───", "ccc │ d"] and set(plain[12]) == {"─"}
