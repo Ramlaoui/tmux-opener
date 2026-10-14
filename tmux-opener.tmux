@@ -36,7 +36,7 @@ fi
 download_key="${download_key:-d}"
 save_as_key="${save_as_key:-D}"
 view_key="${view_key:-i}"
-upload_key="${upload_key:-U}"
+upload_key="${upload_key:-P}"
 
 cmd="TMUX_OPENER_CWD=#{q:pane_current_path}"
 if [ -n "$socket_path" ]; then

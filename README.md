@@ -185,7 +185,7 @@ client bridge; they do not use the same-host opener fallback.
 
 ### Upload desktop files
 
-Press **prefix + `U`** in a pane on the host. A file dialog opens on the
+Press **prefix + `P`** in a pane on the host. A file dialog opens on the
 **client machine**; the files you pick are copied into that pane's current
 directory. Pick several files to upload them together; folders are not
 supported yet.
@@ -329,7 +329,7 @@ Defaults:
 - Copy-mode download keys: `d` (Downloads), `D` (save dialog)
 - Copy-mode inline view key: `i`
 - Prefix target picker key: `o`
-- Prefix upload key: `U`
+- Prefix upload key: `P` (`U` is taken by TPM's plugin update)
 - Remote socket: `/tmp/tmux-opener-$USER.sock`
 - Remote folders open in a new VS Code Remote-SSH window
 - Remote files open in a new VS Code Remote-SSH window rooted at the pane cwd,
@@ -347,7 +347,7 @@ set -g @tmux_opener_download_key 'd'
 set -g @tmux_opener_save_as_key 'D'
 set -g @tmux_opener_view_key 'i'
 set -g @tmux_opener_picker_key 'o'
-set -g @tmux_opener_upload_key 'U'
+set -g @tmux_opener_upload_key 'P'
 set -g @tmux_opener_fallback 'auto' # or local, command, none
 ```
 
