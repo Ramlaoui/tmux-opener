@@ -21,8 +21,10 @@ import termios
 import threading
 import time
 import tty
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO
 
 from tmux_opener_common import IMAGE_SUFFIXES
 
@@ -56,7 +58,6 @@ class Pdf:
 # draws one frame at the image's own size, and play() animates with PNG frames.
 CHAFA_PIXELS = ["chafa", "--format=kitty", "--passthrough=tmux", "--probe=off", "--animate=off",
                 "--exact-size=on", "--align=mid,mid"]
-ANIMATED_SUFFIXES = {".gif": "gif", ".webp": "webp"}  # ImageMagick reader prefixes
 KITTY_REPLY_RE = re.compile(r"\x1b_G[^\x1b]*\x1b\\")
 # Keys that move between PDF pages, including arrows and PgUp/PgDn.
 PAGE_STEPS = {" ": 1, "j": 1, "l": 1, "n": 1, "\x1b[B": 1, "\x1b[C": 1, "\x1b[6~": 1,
@@ -185,50 +186,72 @@ def show(data: bytes) -> None:
     sys.stdout.buffer.flush()
 
 
-def play(drawing: subprocess.Popen[bytes], path: Path, stop: threading.Event, shown: threading.Event) -> None:
-    """Pass chafa's frame through; animations instead get PNG frames under its image id.
+def png_files(stream: IO[bytes]) -> Iterator[bytes]:
+    """Split concatenated PNG files at their IEND chunks."""
 
-    chafa sends raw pixels, seconds of data over SSH for a single frame. Each PNG frame waits
-    for the terminal's reply to the last one, so a slow link lowers the frame rate instead of
-    queueing frames in tmux and SSH that hold back the key closing the view.
+    while signature := stream.read(8):
+        png = [signature]
+        while True:
+            header = stream.read(8)
+            if len(header) < 8:
+                return
+            png += [header, stream.read(int.from_bytes(header[:4], "big") + 4)]  # data and CRC
+            if header[4:] == b"IEND":
+                break
+        yield b"".join(png)
+
+
+def play(drawing: subprocess.Popen[bytes], path: Path, stop: threading.Event, shown: threading.Event) -> None:
+    """Pass chafa's frame through; GIFs instead get PNG frames under its image id.
+
+    chafa sends raw pixels, seconds of data over SSH for a single frame. ffmpeg decodes one
+    frame at a time, so long GIFs need little memory. Each frame waits for the terminal's
+    reply to the last one, so a slow link lowers the frame rate instead of queueing frames in
+    tmux and SSH that hold back the key closing the view.
     """
 
-    magick = shutil.which("magick")
-    reader = ANIMATED_SUFFIXES.get(path.suffix.lower())
-    if not (magick and reader):
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if path.suffix.lower() != ".gif" or not (ffmpeg and ffprobe):
         for chunk in iter(lambda: drawing.stdout.read1(65536), b""):  # type: ignore[union-attr]
             show(chunk)
         return
     drawn = drawing.stdout.read()  # type: ignore[union-attr]
-    source = f"{reader}:{path.absolute()}"  # the prefix keeps ImageMagick from sniffing other formats
-    with tempfile.TemporaryDirectory(prefix="tmux-opener-frames-") as folder:
-        first = Path(folder, "first.png")
-        subprocess.run([magick, f"{source}[0]", str(first)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-        placement = re.search(rb"a=T,U=1,[^;]*", drawn)
-        if drawing.wait() or not placement or not first.exists():
-            show(drawn)
-            return
-        keys = dict(field.split(b"=", 1) for field in placement.group().split(b","))
-        # Keep chafa's placeholder cells but send the pixels as a PNG.
-        show(kitty_png(first.read_bytes(), keys) + re.sub(rb"\x1bPtmux;\x1b\x1b_G[^\x1b]*\x1b\x1b\\\x1b\\", b"", drawn))
-        subprocess.run([magick, source, "-coalesce", f"{folder}/%04d.png"], stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL, check=False)
-        delays = subprocess.run([magick, "identify", "-format", "%T\n", source], capture_output=True,
-                                text=True, check=False).stdout.split()
-        frames = sorted(Path(folder).glob("0*.png"))
-        if len(frames) < 2 or len(delays) != len(frames):
-            return
-        while True:
-            for frame, delay in zip(frames, delays):
-                due = time.monotonic() + max(int(delay), 2) / 100  # GIF delays are in centiseconds
+    placement = re.search(rb"a=T,U=1,[^;]*", drawn)
+    if drawing.wait() or not placement:
+        show(drawn)
+        return
+    keys = dict(field.split(b"=", 1) for field in placement.group().split(b","))
+    # Keep chafa's placeholder cells but send the pixels as PNGs.
+    cells = re.sub(rb"\x1bPtmux;\x1b\x1b_G[^\x1b]*\x1b\x1b\\\x1b\\", b"", drawn)
+    durations = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                "packet=duration_time", "-of", "csv=p=0", "--", str(path)],
+                               capture_output=True, text=True, check=False).stdout.split()
+    delays = [max(float(duration), 0.02) if duration[0].isdigit() else 0.1 for duration in durations]
+    # A palette per frame keeps GIF colors exact and halves the PNGs sent over the link.
+    palette = "split[a][b];[a]palettegen=stats_mode=single:reserve_transparent=1[p];[b][p]paletteuse=new=1:dither=none"
+    decode = [ffmpeg, "-v", "error", "-i", str(path.absolute()), "-vsync", "passthrough", "-vf", palette,
+              "-f", "image2pipe", "-c:v", "png", "-"]
+    count = 0
+    while count != 1:  # loop animations; a single frame stays up
+        frames = subprocess.Popen(decode, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            for index, png in enumerate(png_files(frames.stdout)):  # type: ignore[arg-type]
+                due = time.monotonic() + (delays[index] if index < len(delays) else 0.1)
                 shown.clear()
-                show(kitty_png(frame.read_bytes(), keys))
+                show(kitty_png(png, keys) + (cells if not count else b""))
+                count = max(count, index + 1)
                 give_up = time.monotonic() + 2  # for terminals that never reply
                 while not shown.is_set() and time.monotonic() < give_up:
                     if stop.wait(0.01):
                         return
                 if stop.wait(max(due - time.monotonic(), 0)):
                     return
+        finally:
+            frames.kill()
+            frames.wait()
+        if not count:
+            show(drawn)
+            return
 
 
 def page_table(screen: curses.window, view: Table) -> int:
