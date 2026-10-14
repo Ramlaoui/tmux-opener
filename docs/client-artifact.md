@@ -12,10 +12,10 @@ separately on the SSH/tmux hosts where selections should be opened.
 
 - Python 3.10 or newer
 - `ssh`
-- SSH key/agent authentication for background file downloads
+- SSH key/agent authentication for background file downloads and uploads
 - A desktop opener: `open` on macOS, `xdg-open` on Linux, or `cmd /c start` on Windows
 - Optional: VS Code's `code` CLI for direct Remote-SSH editor launches
-- For the `D` save dialog: native macOS support, or `zenity`, `kdialog`, or Python Tk
+- For the `D` save dialog and the upload picker: native macOS support, or `zenity`, `kdialog`, or Python Tk
 
 ## Install from archive
 
@@ -233,3 +233,14 @@ them; the notification text is passed as an argument, never as script source.
 Default logs omit paths and SSH stderr; enable client `--verbose` for details.
 Downloads honor the client's `--ssh-config` and disable inherited forwarding,
 connection sharing, and local commands.
+
+## Upload desktop files
+
+On the host, prefix + `U` asks this client to upload into the pane's current
+directory. The client opens a file dialog naming the host and directory; only
+the files picked there are sent. The remote request carries just the directory,
+never local paths. Each file streams over the same hardened SSH command into a
+hidden temporary file, is checked for its full size, and is renamed to a free
+name (` (1)`, ` (2)`, ...) without replacing remote files. Uploads share the
+download queue, dashboards, cancel/retry and notifications. Folders are not
+supported yet.

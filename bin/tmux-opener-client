@@ -81,6 +81,32 @@ RESUME_SCRIPT = (
     'echo "$id"; '
     'if [ "$id" = "$3" ]; then exec tail -c +"$2" -- "$1"; else exec cat -- "$1"; fi'
 )
+# Runs under the remote login shell's `sh -c DIR NAME SIZE TOKEN`: write stdin to a
+# private temporary file in DIR, check its size, then publish it as NAME or
+# "STEM (N).EXT" without replacing an existing file. Prints the published name.
+UPLOAD_SCRIPT = (
+    'cd -- "$1" 2>/dev/null || exit 2; '
+    'tmp=.tmux-opener-upload-$4; '
+    '(set -C; : > "$tmp") 2>/dev/null || exit 3; '
+    "trap 'rm -f -- \"$tmp\"' EXIT; trap 'exit 1' HUP INT TERM PIPE; "
+    'cat > "$tmp" || exit 6; '
+    '[ "$(wc -c < "$tmp" | tr -d " ")" = "$3" ] || exit 4; '
+    'case $2 in ?*.*) stem=${2%.*} ext=.${2##*.} ;; *) stem=$2 ext= ;; esac; '
+    'target=$2 n=0; '
+    'until (set -C; : > "$target") 2>/dev/null; do '
+    '[ -e "$target" ] || [ -L "$target" ] || exit 3; '
+    'n=$((n + 1)); [ "$n" -lt 100 ] || exit 5; target="$stem ($n)$ext"; '
+    'done; '
+    'mv -f -- "$tmp" "$target" || exit 3; '
+    'printf "%s\\n" "$target"'
+)
+UPLOAD_ERRORS = {
+    2: "the remote folder does not exist or cannot be entered",
+    3: "cannot create files in the remote folder",
+    4: "the remote copy is incomplete",
+    5: "too many files with this name in the remote folder",
+    6: "the remote disk could not store the file",
+}
 ACTIVE_FOLDERS: set[Path] = set()
 ACTIVE_FOLDERS_LOCK = threading.Lock()
 # Folders download privately, then get the permissions a plain mkdir would give.
@@ -122,7 +148,8 @@ def ping_response(args: argparse.Namespace) -> dict[str, object]:
         "version": 1,
         "instance_id": INSTANCE_ID,
         "client": "tmux-opener-client",
-        "capabilities": ["remote_pdf", "download_status", "settings", "download_folder", "restart_client"],
+        "capabilities": ["remote_pdf", "download_status", "settings", "download_folder", "restart_client",
+                         "upload_files"],
         "pid": os.getpid(),
         "default_ssh_host": args.default_ssh_host,
         "allowed_ssh_hosts": sorted(args.allow_ssh_host),
@@ -826,26 +853,9 @@ def choose_download_path(default: Path, cancel: threading.Event | None = None) -
                    "from pathlib import Path; p=Path(sys.argv[1]); root=tk.Tk(); root.withdraw(); "
                    "print(filedialog.asksaveasfilename(title='Save remote file', "
                    "initialdir=str(p.parent), initialfile=p.name)); root.destroy()", str(default)]
-    if cancel is None:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
-    else:
-        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
-            while True:
-                if cancel.is_set():
-                    terminate_process(process)
-                    return None
-                try:
-                    output, errors = process.communicate(timeout=0.2)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-            result = subprocess.CompletedProcess(command, process.returncode, output, errors)
-    if result.returncode:
-        if result.returncode == 1 and system != "Darwin" and command[0] != sys.executable:
-            return None
-        if system == "Darwin" and "(-128)" in result.stderr:
-            return None
-        raise RequestError(f"save dialog failed; install zenity, kdialog or Tk on the client: {result.stderr.strip()}")
+    result = run_dialog(command, cancel, "save")
+    if result is None:
+        return None
     path = result.stdout.strip()
     if not path:
         return None
@@ -868,9 +878,73 @@ def ask_download_path(default: Path, cancel: threading.Event | None) -> Path | N
     return destination
 
 
+def run_dialog(command: list[str], cancel: threading.Event | None, name: str) -> subprocess.CompletedProcess | None:
+    """Run a file dialog; None means the user or a cancelled transfer closed it."""
+
+    if cancel is None:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    else:
+        with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as process:
+            while True:
+                if cancel.is_set():
+                    terminate_process(process)
+                    return None
+                try:
+                    output, errors = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            result = subprocess.CompletedProcess(command, process.returncode, output, errors)
+    if result.returncode:
+        if result.returncode == 1 and command[0] in ("zenity", "kdialog"):
+            return None
+        if command[0] == "osascript" and "(-128)" in result.stderr:
+            return None
+        raise RequestError(f"{name} dialog failed; install zenity, kdialog or Tk on the client: {result.stderr.strip()}")
+    return result
+
+
+def choose_upload_files(prompt: str, cancel: threading.Event | None = None) -> list[Path] | None:
+    if platform.system() == "Darwin":
+        command = [
+            "osascript", "-e",
+            'on run argv\nset picked to choose file with prompt (item 1 of argv) with multiple selections allowed\n'
+            'set output to ""\nrepeat with chosen in picked\nset output to output & POSIX path of chosen & linefeed\n'
+            'end repeat\nreturn output\nend run',
+            prompt,
+        ]
+    elif shutil.which("zenity"):
+        command = ["zenity", "--file-selection", "--multiple", "--separator=\n", f"--title={prompt}"]
+    elif shutil.which("kdialog"):
+        command = ["kdialog", "--getopenfilename", str(Path.home()), "--multiple", "--separate-output",
+                   "--title", prompt]
+    else:
+        command = [sys.executable, "-c",
+                   "import sys, tkinter as tk; from tkinter import filedialog; root=tk.Tk(); root.withdraw(); "
+                   "print('\\n'.join(filedialog.askopenfilenames(title=sys.argv[1]))); root.destroy()", prompt]
+    result = run_dialog(command, cancel, "file")
+    if result is None:
+        return None
+    files = list(dict.fromkeys(Path(line) for line in result.stdout.splitlines() if line))
+    if not all(path.is_absolute() for path in files):
+        raise RequestError("file dialog returned a relative path")
+    return files or None
+
+
+def ask_upload_files(prompt: str, cancel: threading.Event) -> list[Path] | None:
+    while not SAVE_DIALOG_LOCK.acquire(timeout=0.2):
+        if cancel.is_set():
+            return None
+    try:
+        return choose_upload_files(prompt, cancel)
+    finally:
+        SAVE_DIALOG_LOCK.release()
+
+
 def download_notification(message: str) -> None:
-    failed = message.startswith("Download failed")
-    log_line("download failed; enable --verbose for details" if failed else "download completed")
+    failed = message.startswith(("Download failed", "Upload failed"))
+    transfer = "upload" if message.startswith("Upload") else "download"
+    log_line(f"{transfer} failed; enable --verbose for details" if failed else f"{transfer} completed")
     policy = opener_settings.load()[0]["download_notifications"]
     if policy == "off" or (policy == "failures" and not failed):
         return
@@ -1089,6 +1163,128 @@ def download_file(
             partial.close()
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def send_upload(
+    host: str, directory: str, source: BinaryIO, name: str, size: int, ssh: str, ssh_config: str | None,
+    verbose: bool, sent, cancel: threading.Event,
+) -> str | None:
+    """Stream one file into the remote folder; returns its published name, or None if cancelled."""
+
+    arguments = " ".join(shlex.quote(value) for value in (directory, name, str(size), uuid.uuid4().hex[:16]))
+    command = ssh_command(host, f"sh -c {shlex.quote(UPLOAD_SCRIPT)} sh {arguments}", ssh, ssh_config)
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+        try:
+            os.set_blocking(process.stdin.fileno(), False)
+            written = 0
+            chunk = b""
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdin, selectors.EVENT_WRITE)
+                while written < size and process.poll() is None:
+                    if cancel.is_set():
+                        terminate_process(process)
+                        return None
+                    if not selector.select(timeout=0.2):
+                        continue
+                    if not chunk:
+                        chunk = source.read(min(256 * 1024, size - written))
+                        if not chunk:
+                            raise RequestError(f"{name} changed while uploading")
+                    try:
+                        count = os.write(process.stdin.fileno(), chunk)
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        break  # The remote script stopped; its exit status says why.
+                    chunk = chunk[count:]
+                    written += count
+                    sent(count)
+            while True:
+                if cancel.is_set():
+                    terminate_process(process)
+                    return None
+                try:
+                    output, _errors = process.communicate(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            if process.poll() is None:
+                terminate_process(process)
+        if process.returncode:
+            detail = stderr_suffix(errors) if verbose else ""
+            reason = UPLOAD_ERRORS.get(process.returncode, f"SSH exited {process.returncode}")
+            raise RequestError(f"{reason}{detail}")
+    return output.decode("utf-8", "replace").rstrip("\n") or name
+
+
+def upload_files(
+    host: str, directory: str, files: list[str] | None, ssh: str, ssh_config: str | None = None,
+    verbose: bool = False, progress=None, cancel: threading.Event | None = None,
+) -> dict[str, object]:
+    """Upload files picked on this desktop into a remote folder, never replacing remote files."""
+
+    cancel = cancel or threading.Event()
+    progress = progress or (lambda **_fields: None)
+    sent = 0
+
+    def count(amount: int) -> None:
+        nonlocal sent
+        sent += amount
+        progress(bytes_received=sent)
+
+    try:
+        if files is None:
+            chosen = ask_upload_files(f"Upload to {host}:{directory}", cancel)
+            if chosen is None:
+                log_line(f"upload cancelled: {host}:{directory}" if verbose else "upload cancelled")
+                return {"state": "cancelled"}
+            files = [str(path) for path in chosen]
+            # A retry sends the same files without asking again.
+            progress(files=files, file_count=len(files), ask_destination=False)
+        sizes = []
+        for path in files:
+            try:
+                info = os.stat(path)
+            except OSError as exc:
+                raise RequestError(f"cannot read {Path(path).name}: {exc.strerror}") from None
+            if not stat.S_ISREG(info.st_mode):
+                raise RequestError(f"only regular files can be uploaded: {Path(path).name}")
+            sizes.append(info.st_size)
+        total = sum(sizes)
+        log_line(f"upload started: {host}:{directory}" if verbose else "upload started")
+        progress(state="uploading", size_bytes=total, bytes_received=0)
+        names = []
+        for index, (path, size) in enumerate(zip(files, sizes)):
+            name = Path(path).name
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                raise RequestError(f"cannot read {name}: {exc.strerror}") from None
+            with os.fdopen(fd, "rb") as source:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise RequestError(f"only regular files can be uploaded: {name}")
+                os.set_blocking(fd, True)
+                published = send_upload(host, directory, source, name, size, ssh, ssh_config, verbose, count, cancel)
+            if published is None:
+                return {"state": "cancelled", "bytes_received": sent}
+            names.append(published)
+            # Failed uploads retry only the files that did not arrive.
+            progress(files=files[index + 1:])
+        label = names[0] if len(names) == 1 else f"{len(names)} files"
+        message = f"Uploaded {label} to {host}:{directory}"
+        if verbose:
+            log_line(message)
+        download_notification(message)
+        destination = str(PurePosixPath(directory) / names[0]) if len(names) == 1 else directory
+        return {"state": "completed", "destination": destination, "bytes_received": total, "error": None}
+    except (OSError, RequestError) as exc:
+        message = f"Upload failed for {host}:{directory}: {exc}"
+        if verbose:
+            log_line(message)
+        download_notification(message)
+        return {"state": "failed", "bytes_received": sent, "error": str(exc)[:2000]}
 
 
 class TransferCancelled(Exception):
@@ -1340,6 +1536,22 @@ def queue_download(host: str, path: str, args: argparse.Namespace, ask_destinati
     return {"download_id": job["id"], "state": "queued"}
 
 
+def queue_upload(host: str, directory: str, args: argparse.Namespace) -> dict[str, object] | None:
+    # The remote names only the folder; the user picks the files in a client dialog.
+    if len(directory) > 4096 or any(character in directory for character in "\r\n"):
+        raise RequestError("upload folder must contain no newlines")
+    if not shutil.which("ssh"):
+        raise RequestError("ssh is not installed on the client")
+    if args.dry_run:
+        log_line(f"dry-run upload: client file dialog -> {host}:{directory}" if args.verbose else "dry-run upload")
+        return None
+    try:
+        job = args.download_queue.submit(host, directory, True, kind="upload")
+    except (ValueError, OSError) as exc:
+        raise RequestError("download queue could not accept this transfer") from exc
+    return {"download_id": job["id"], "state": "queued"}
+
+
 def observe_host(request: dict[str, object], args: argparse.Namespace) -> None:
     global LAST_REQUEST_AT
     LAST_REQUEST_AT = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1428,7 +1640,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
         return {"download_id": result["id"], "state": result["state"]}
 
     if action in ("open_url", "open_vscode_remote", "open_remote_localhost", "open_remote_pdf", "download_file",
-                  "download_folder"):
+                  "download_folder", "upload_files"):
         log_line(f"request action={action}")
 
     if action == "open_url":
@@ -1473,7 +1685,7 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
         )
         return
 
-    if action in ("open_remote_localhost", "open_remote_pdf", "download_file", "download_folder"):
+    if action in ("open_remote_localhost", "open_remote_pdf", "download_file", "download_folder", "upload_files"):
         if "ssh_host" not in request and args.default_ssh_host:
             request = {**request, "ssh_host": args.default_ssh_host}
         if args.allow_any_ssh_host:
@@ -1490,6 +1702,8 @@ def dispatch(request: dict[str, object], args: argparse.Namespace) -> dict[str, 
             return
         host = validate_host(request.get("ssh_host"), allowed_hosts)
         path = validate_path(request.get("path"))
+        if action == "upload_files":
+            return queue_upload(host, path, args)
         ask_destination = request.get("ask_destination", False)
         if not isinstance(ask_destination, bool):
             raise RequestError("ask_destination must be a boolean")
@@ -1732,6 +1946,10 @@ def bind_server(socket_path: str) -> OwnedServer:
 
 
 def transfer_job(job: dict, update, cancel: threading.Event, args: argparse.Namespace) -> dict[str, object]:
+    if job.get("kind") == "upload":
+        return upload_files(job["ssh_host"], job["path"], None if job["ask_destination"] else job.get("files"),
+                            shutil.which("ssh") or "ssh", args.ssh_config, args.verbose,
+                            progress=update, cancel=cancel)
     if job.get("kind") == "folder":
         return download_folder(job["ssh_host"], job["path"], job.get("files"), job["ask_destination"],
                                shutil.which("ssh") or "ssh", args.ssh_config, args.verbose,

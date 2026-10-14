@@ -344,12 +344,12 @@
       };
       const kind = (download) => {
         const raw = String(download && download.state || "").toLowerCase();
-        if (raw === "downloading") return "running";
-        if (raw === "queued" || raw === "choosing_destination") return "queued";
+        if (raw === "downloading" || raw === "uploading") return "running";
+        if (raw === "queued" || raw === "choosing_destination" || raw === "choosing_files") return "queued";
         if (raw === "failed" || raw === "interrupted") return "error";
         return raw || "queued";
       };
-      const STATE_LABEL = { downloading: "Downloading", queued: "Queued", choosing_destination: "Choosing file", completed: "Completed", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
+      const STATE_LABEL = { downloading: "Downloading", queued: "Queued", choosing_destination: "Choosing file", uploading: "Uploading", choosing_files: "Picking files", completed: "Completed", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
       const clients = () => state.snapshot && Array.isArray(state.snapshot.clients) ? state.snapshot.clients : [];
       const transfers = () => clients().flatMap((client) => (Array.isArray(client.downloads) ? client.downloads : []).map((download) => ({ client, download })));
       const inFilter = (item, filter) => {
@@ -437,11 +437,16 @@
         const k = kind(download);
         const row = el("div", "row");
         const folder = download.kind === "folder";
-        row.append(folder ? el("div", "ext k-dir", "dir") : extBadge(download.path));
+        const upload = download.kind === "upload";
+        const count = download.file_count;
+        const uploaded = upload && count === 1 && download.destination ? basename(download.destination) : "";
+        row.append(folder ? el("div", "ext k-dir", "dir") : upload ? (uploaded ? extBadge(uploaded) : el("div", "ext k-dir", "up")) : extBadge(download.path));
 
         const main = el("div");
         main.style.minWidth = "0";
-        const name = el("div", "name", `${basename(download.path) || text(download.id, "Download")}${folder ? "/" : ""}`);
+        const label = upload ? uploaded || (Number.isInteger(count) ? `${count} files` : "Upload")
+          : `${basename(download.path) || text(download.id, "Download")}${folder ? "/" : ""}`;
+        const name = el("div", "name", label);
         name.title = text(download.path, "");
         main.append(name);
         const sub = el("div", "sub");
@@ -452,11 +457,11 @@
           resumed.title = `Continued from ${bytes(Number(download.resumed_from))} already received`;
           sub.append(resumed);
         }
+        if (upload) sub.append(el("span", "tag", "Upload"));
         if (folder) {
-          const count = download.file_count;
           sub.append(el("span", "tag", Number.isInteger(count) ? `${count} file${count === 1 ? "" : "s"}` : "Folder"));
         }
-        const path = el("span", "path mono", `‎${download.destination && k === "completed" ? `→ ${download.destination}` : dirname(download.path)}`);
+        const path = el("span", "path mono", `‎${upload ? `→ ${text(download.destination || download.path, "")}` : download.destination && k === "completed" ? `→ ${download.destination}` : dirname(download.path)}`);
         path.title = download.destination ? `${download.path}\n→ ${download.destination}` : text(download.path, "");
         sub.append(path);
         main.append(sub);

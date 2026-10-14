@@ -1,7 +1,8 @@
 # tmux-opener
 
 Open URLs and remote file paths from tmux copy mode on an SSH host using your
-local desktop browser or VS Code Remote-SSH, or download files to your desktop.
+local desktop browser or VS Code Remote-SSH, download files to your desktop, or
+upload desktop files into the pane's directory.
 
 ## Contents
 
@@ -182,6 +183,26 @@ On macOS, `D` uses the native save dialog. On Linux it uses `zenity` or `kdialog
 with Python Tk as a fallback. Windows uses Python Tk. Downloads require the
 client bridge; they do not use the same-host opener fallback.
 
+### Upload desktop files
+
+Press **prefix + `U`** in a pane on the host. A file dialog opens on the
+**client machine**; the files you pick are copied into that pane's current
+directory. Pick several files to upload them together; folders are not
+supported yet.
+
+The host only names the destination directory. It cannot choose, list or read
+desktop files: nothing is sent unless you pick it in the dialog, which shows the
+host and directory it uploads to. Uploads never replace remote files: a name
+that already exists gets ` (1)`, ` (2)`, etc., as downloads do. Each file is
+written to a hidden temporary file in the directory and renamed only once every
+byte arrived, so a failed or cancelled upload leaves nothing behind.
+
+Uploads use the same SSH host alias, authentication requirements, queue,
+dashboards and notifications as downloads. Retrying a failed upload sends the
+files that did not arrive, without asking again. On macOS the picker is the
+native open dialog; on Linux it uses `zenity` or `kdialog`, with Python Tk as a
+fallback.
+
 ### Download queue and dashboards
 
 Press **prefix + `O`** (capital O) on the host to open the live tmux dashboard.
@@ -308,6 +329,7 @@ Defaults:
 - Copy-mode download keys: `d` (Downloads), `D` (save dialog)
 - Copy-mode inline view key: `i`
 - Prefix target picker key: `o`
+- Prefix upload key: `U`
 - Remote socket: `/tmp/tmux-opener-$USER.sock`
 - Remote folders open in a new VS Code Remote-SSH window
 - Remote files open in a new VS Code Remote-SSH window rooted at the pane cwd,
@@ -325,6 +347,7 @@ set -g @tmux_opener_download_key 'd'
 set -g @tmux_opener_save_as_key 'D'
 set -g @tmux_opener_view_key 'i'
 set -g @tmux_opener_picker_key 'o'
+set -g @tmux_opener_upload_key 'U'
 set -g @tmux_opener_fallback 'auto' # or local, command, none
 ```
 

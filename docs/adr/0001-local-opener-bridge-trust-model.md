@@ -8,3 +8,10 @@ destination and constructs a fixed, shell-quoted SSH command to read a regular
 file. Remote requests cannot specify local destination paths or shell commands.
 Downloads are queued asynchronously and published only after SSH succeeds,
 without overwriting existing files.
+
+Upload Requests carry only an absolute remote destination directory for an
+allowlisted host. They never name local files: the client asks the user to pick
+files in a local dialog that shows the destination, so a remote session cannot
+read desktop files the user did not choose. Dropping files onto a terminal is
+not supported, because it would need the remote to ask for local paths. Uploads
+use the same fixed SSH command and never replace existing remote files.

@@ -19,6 +19,11 @@ folder, or `D` to open a save dialog on the client. Both require an updated Loca
 Opener Client and an available bridge. Several paths can be selected, one per
 line or space-separated (quote filenames containing spaces).
 
+Press the tmux prefix followed by `U` to pick files on the client and upload
+them into the pane's current directory (`@tmux_opener_upload_key`). The client
+must advertise the `upload_files` capability; older clients are refused with a
+message.
+
 ## Host dashboard
 
 Press the tmux prefix followed by `O` to open the host dashboard. It reports
