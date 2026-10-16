@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import socket
 import stat
 import subprocess
@@ -44,6 +45,9 @@ HOST_ALIAS = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._+@-]{0,254}")
 MAX_INCLUDE_DEPTH = 16
 MAX_SSH_HOSTS = 1000
 ADD_BRIDGE_TIMEOUT = 30.0
+UPDATE_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "tmux-opener-update"
+UPDATE_PLUGIN_TIMEOUT = 90.0
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 
 def _utc_now() -> str:
@@ -226,6 +230,45 @@ def add_bridge(host: str, ssh_config: Path, state_dir: Path, snippet_dir: Path,
     return {"ok": True, "host": host}
 
 
+def update_plugin(host: str, ssh_config: Path, state_dir: Path, snippet_dir: Path,
+                  timeout: float = UPDATE_PLUGIN_TIMEOUT, ssh: str | None = None) -> dict[str, object]:
+    """Fast-forward the Remote Opener Plugin on a bridged host and reload its bindings.
+
+    Only desktop dashboards call this: the client socket has no update action,
+    so a remote session cannot trigger it. The host runs this install's own
+    update script, piped to ``sh -s``; nothing in the command comes from it.
+    """
+
+    if not isinstance(host, str) or not HOST_ALIAS.fullmatch(host) or host not in _configured_sockets(snippet_dir, state_dir):
+        return _error_response("host has no tmux-opener bridge")
+    try:
+        script = UPDATE_SCRIPT.read_bytes()
+    except OSError:
+        return _error_response("the plugin update script is missing from this install")
+    command = [ssh or shutil.which("ssh") or "ssh"]
+    if Path(ssh_config).expanduser() != default_ssh_config():
+        command += ["-F", str(Path(ssh_config).expanduser())]
+    # The client's transfer isolation: no prompts, no shared master, no bridge forward.
+    command += ["-T", "-S", "none", "-o", "ControlMaster=no", "-o", "ClearAllForwardings=yes",
+                "-o", "PermitLocalCommand=no", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                "--", host, "sh -s"]
+    try:
+        result = subprocess.run(command, input=script, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return _error_response(f"updating {host} timed out")
+    except OSError as exc:
+        return _error_response(f"cannot run ssh: {exc}")
+
+    def last_line(data: bytes) -> str:
+        lines = [CONTROL_CHARACTERS.sub("", line).strip() for line in data.decode("utf-8", "replace").splitlines()]
+        return next((line[:300] for line in reversed(lines) if line), "")
+
+    message = last_line(result.stdout)
+    if result.returncode != 0:
+        return _error_response(message or last_line(result.stderr) or f"ssh exited with status {result.returncode}")
+    return {"ok": True, "host": host, "message": message or f"tmux-opener on {host} updated"}
+
+
 def _status_entry(host: str, path: str, response: dict[str, object]) -> dict[str, object]:
     ok = response.get("ok")
     if type(ok) is not bool:
@@ -367,6 +410,10 @@ def collect_status(
     with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
         polled = list(executor.map(poll, candidates))
     entries = [_status_entry(candidate_host, candidate_path, response) for candidate_host, candidate_path, response in polled]
+    bridges = _configured_sockets(snippet_dir, state_dir)
+    for entry in entries:
+        # Updating runs over SSH, so it needs a bridged alias, not a live client.
+        entry["can_update"] = entry["host"] in bridges
     return {"clients": entries, "updated_at": _utc_now()}
 
 
@@ -545,7 +592,7 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_error_json(HTTPStatus.MISDIRECTED_REQUEST, "request host is not allowed")
             return
         route = urllib.parse.urlsplit(self.path)
-        if route.path not in {"/api/action", "/api/settings", "/api/clients", "/api/bridges"}:
+        if route.path not in {"/api/action", "/api/settings", "/api/clients", "/api/bridges", "/api/plugin-update"}:
             self._send_error_json(HTTPStatus.NOT_FOUND, "not found")
             return
         if not self._api_guard(require_origin=True):
@@ -562,6 +609,17 @@ class _DashboardHandler(BaseHTTPRequestHandler):
                 self._send_error_json(HTTPStatus.FORBIDDEN, "host is not a concrete alias in the SSH config")
                 return
             response = add_bridge(host, self.server.ssh_config, self.server.state_dir, self.server.snippet_dir)
+            self._send_json(response, HTTPStatus.OK if response.get("ok") is True else HTTPStatus.BAD_GATEWAY)
+            return
+        if route.path == "/api/plugin-update":
+            host = payload.get("host")
+            if set(payload) != {"host"} or not isinstance(host, str):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "host must be the only field")
+                return
+            if host not in _configured_sockets(self.server.snippet_dir, self.server.state_dir):
+                self._send_error_json(HTTPStatus.FORBIDDEN, "host has no tmux-opener bridge")
+                return
+            response = update_plugin(host, self.server.ssh_config, self.server.state_dir, self.server.snippet_dir)
             self._send_json(response, HTTPStatus.OK if response.get("ok") is True else HTTPStatus.BAD_GATEWAY)
             return
         if route.path == "/api/clients":

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Lets scripts/tmux-opener-update find a plugin installed outside TPM's paths.
+tmux set-option -gq @tmux_opener_dir "$CURRENT_DIR"
 
 shell_quote() {
   printf '%q' "$1"

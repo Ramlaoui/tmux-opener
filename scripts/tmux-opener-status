@@ -39,6 +39,8 @@ REFRESH_SECONDS = 1.0
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "tmux-opener"
 DEFAULT_SNIPPET_DIR = Path.home() / ".ssh" / "tmux-opener.d"
 DEFAULT_SSH_CONFIG = Path.home() / ".ssh" / "config"
+UPDATE_SCRIPT = Path(__file__).resolve().with_name("tmux-opener-update")
+UPDATE_TIMEOUT = 90.0
 
 
 class StatusError(RuntimeError):
@@ -231,6 +233,38 @@ def request_add_bridge(host: str, ssh_config: str | os.PathLike[str], state_dir:
     if response.get("ok") is not True:
         raise StatusError(sanitize_terminal_text(response.get("error")) or "bridge was not added")
     return f"bridge ready for {sanitize_terminal_text(host)}; connect with ssh {sanitize_terminal_text(host)}"
+
+
+def request_plugin_update(client: Mapping[str, object], *, local: bool, ssh_config: str | os.PathLike[str],
+                          state_dir: str | os.PathLike[str], snippet_dir: str | os.PathLike[str]) -> str:
+    """Update the Remote Opener Plugin and return a status message.
+
+    A desktop dashboard reaches the selected bridged host over SSH; a host
+    dashboard runs the update script of its own install.
+    """
+
+    if local:
+        host = sanitize_terminal_text(client.get("host"))
+        if client.get("can_update") is not True:
+            raise StatusError(f"{host} has no bridge to update over")
+        _local_dashboard_api()  # puts the package root on sys.path
+        from lib.tmux_opener_dashboard import update_plugin
+        response = update_plugin(str(client.get("host")), Path(ssh_config).expanduser(), Path(state_dir).expanduser(),
+                                 Path(snippet_dir).expanduser())
+        if response.get("ok") is not True:
+            raise StatusError(sanitize_terminal_text(response.get("error")) or "plugin was not updated")
+        return sanitize_terminal_text(response.get("message"))
+    try:
+        # A new session has no terminal, so git and ssh fail instead of prompting over the dashboard.
+        result = subprocess.run([str(UPDATE_SCRIPT)], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                errors="replace", timeout=UPDATE_TIMEOUT, start_new_session=True, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise StatusError("plugin update timed out") from exc
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    message = sanitize_terminal_text(lines[-1]) if lines else ""
+    if result.returncode != 0:
+        raise StatusError(message or f"plugin update exited with status {result.returncode}")
+    return message or "plugin updated"
 
 
 def request_local_action(download: Mapping[str, object], action: str, timeout: float) -> dict[str, object]:
@@ -719,9 +753,11 @@ def render_clients_view(clients: list[dict[str, object]], *, title: str, selecte
                   [(" Started ", "label"), (_ago(info.get("started_at")), "")],
                   [(" Activity", "label"), (" " + _ago(info.get("last_request_at")), "")]]
     lines += [[], [(" Restart interrupts transfers; retry partial copies from Transfers.", "dim")]]
-    lines += [[] for _ in range(max(height - len(lines) - 1, 0))]
-    hints = [("tab", "switch"), ("j/k", "select"), ("r", "restart"), ("R", "restart all online")]
-    lines.append(_hints(hints + ([("a", "add bridge")] if can_add else []) + [("q", "quit")], message))
+    # Results get their own line: update messages are too long to follow the hints.
+    status = [[(" " + message, "accent")]] if message else []
+    lines += [[] for _ in range(max(height - len(lines) - len(status) - 1, 0))] + status
+    hints = [("tab", "switch"), ("j/k", "select"), ("r", "restart"), ("R", "restart all"), ("u", "update plugin")]
+    lines.append(_hints(hints + ([("a", "add bridge")] if can_add else []) + [("q", "quit")]))
     return lines[:height]
 
 
@@ -1120,6 +1156,17 @@ def run_live_dashboard(
                 targets = [clients[client_selected]] if key == ord("r") else [client for client in clients if client.get("can_restart") is True]
                 message = restart_dashboard_clients(targets, timeout)
                 force_refresh = True
+            elif clients and key == ord("u"):
+                # Desktop: the selected client's bridged host. Host: this host's own install.
+                target = clients[client_selected]
+                name = sanitize_terminal_text(target.get("host")) if local else "this host"
+                draw(screen, render_clients_view(clients, title=title, selected=client_selected, width=width, height=height,
+                                                 message=f"updating tmux-opener on {name}…", can_add=local), styles)
+                try:
+                    message = request_plugin_update(target, local=local, ssh_config=ssh_config, state_dir=state_dir,
+                                                    snippet_dir=snippet_dir)
+                except (OSError, ValueError, StatusError) as exc:
+                    message = f"not updated: {sanitize_terminal_text(exc)}"
             elif local and key == ord("a"):
                 try:
                     picker = {"hosts": request_ssh_hosts(ssh_config, snippet_dir), "query": "", "selected": 0}
