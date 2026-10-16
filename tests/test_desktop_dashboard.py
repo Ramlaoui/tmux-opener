@@ -165,6 +165,7 @@ def test_explicit_host_selects_custom_socket_and_missing_host_is_offline(tmp_pat
             "hosts": [],
             "downloads": [],
             "remote_localhost_forwards": [],
+            "can_update": False,
         }
     ]
     assert len(missing["clients"]) == 1

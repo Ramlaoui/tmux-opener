@@ -211,7 +211,8 @@ host/pane information, and recent downloads with progress bars. Use the arrow
 keys or `j`/`k` to select a download, `c` to cancel it, `r` to retry a failed,
 cancelled or interrupted transfer, `Tab` to cycle through Transfers, Clients and
 [Openers](#opener-rules), and `q` to close the popup. In Clients, use `r` to
-restart the selected client or `R` to restart all online clients shown. Configure the
+restart the selected client, `R` to restart all online clients shown, or `u` to
+[update the plugin](#download-queue-and-dashboards). Configure the
 shortcut with:
 
 ```tmux
@@ -252,6 +253,17 @@ conflicting `RemoteForward` is reported rather than overwritten. Pass
 `--ssh-config PATH` to either dashboard to list another config. The remote tmux
 dashboard cannot add bridges: a forwarded session must not edit the desktop's
 SSH config.
+
+**Update plugin** on a browser client card, or `u` in a terminal dashboard's
+Clients view, updates the Remote Opener Plugin the way TPM does: it
+fast-forwards the plugin's git checkout to its tracked branch (usually `main`)
+and reloads its tmux bindings. The desktop dashboards update the selected
+bridged host by piping this install's `scripts/tmux-opener-update` over the same
+batch-mode SSH that downloads use, so the host must accept key or agent
+authentication. The remote tmux dashboard updates its own host. The update
+refuses release-archive installs and checkouts whose local changes would be
+overwritten, and reports the old and new commits. Restart the desktop client
+separately when the desktop install changes too.
 
 The desktop can use the same **prefix + `O`** shortcut. Add this to the local
 desktop's `.tmux.conf` after installing the client archive:

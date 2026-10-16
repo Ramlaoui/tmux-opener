@@ -35,7 +35,7 @@ jobs:
           sudo apt-get install -y shellcheck tmux
 
       - name: Validate shell scripts
-        run: shellcheck tmux-opener.tmux integration/client.tmux scripts/package-artifact scripts/package-client scripts/package-server-plugin
+        run: shellcheck tmux-opener.tmux integration/client.tmux scripts/package-artifact scripts/package-client scripts/package-server-plugin scripts/tmux-opener-update
 
       - name: Run tests
         run: uv run --frozen --group dev pytest

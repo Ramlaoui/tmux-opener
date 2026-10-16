@@ -63,6 +63,14 @@ forwarded remote session can change them; local preview is limited to formats
 that cannot execute code when opened. Inline is answered back to the remote
 plugin, which shows its own file in a tmux popup; the desktop runs nothing.
 
+**Plugin Update**:
+A desktop-initiated fast-forward of a host's git-installed Remote Opener Plugin
+to its tracked branch, followed by reloading its tmux bindings. Desktop
+dashboards pipe their own fixed update script to a bridged host over batch-mode
+SSH; the host's tmux dashboard runs its copy locally. The client socket has no
+update action, so a remote session cannot ask the desktop to start one.
+_Avoid_: self-update, remote upgrade command
+
 **Bridge Availability**:
 The runtime condition that an Open Request can cross the Local Opener Bridge for the current terminal session.
 _Avoid_: SSH detection, remote hostname detection, tmux environment detection
