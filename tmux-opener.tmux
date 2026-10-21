@@ -38,7 +38,8 @@ save_as_key="${save_as_key:-D}"
 view_key="${view_key:-i}"
 upload_key="${upload_key:-P}"
 
-cmd="TMUX_OPENER_CWD=#{q:pane_current_path}"
+# The client PID lets dispatch open on the desktop of whoever pressed the key.
+cmd="TMUX_OPENER_CWD=#{q:pane_current_path} TMUX_OPENER_CLIENT_PID=#{client_pid}"
 if [ -n "$socket_path" ]; then
   cmd="$cmd TMUX_OPENER_SOCKET=$(shell_quote "$socket_path")"
 fi
@@ -70,7 +71,7 @@ tmux bind-key -T copy-mode "$view_key" send-keys -X copy-pipe-and-cancel "$cmd -
 # Uploads need no selection: the client asks for files and copies them into the pane directory.
 tmux bind-key "$upload_key" run-shell -b "TMUX_PANE=#{q:pane_id} $cmd --upload"
 
-picker_cmd="TMUX_OPENER_CWD=\"\$PWD\""
+picker_cmd="TMUX_OPENER_CWD=\"\$PWD\" TMUX_OPENER_CLIENT_PID=#{client_pid}"
 if [ -n "$socket_path" ]; then
   picker_cmd="$picker_cmd TMUX_OPENER_SOCKET=$(shell_quote "$socket_path")"
 fi

@@ -68,8 +68,12 @@ The runtime condition that an Open Request can cross the Local Opener Bridge for
 _Avoid_: SSH detection, remote hostname detection, tmux environment detection
 
 **Bridge Policy**:
-The user-selected rule that decides whether Bridge Availability should be used for a given opener action.
-_Avoid_: automatic SSH guessing, hostname guessing
+The user-selected rule that decides whether Bridge Availability should be used for a given opener action. The default sends requests from a Desktop Client to the same-host opener and everything else to the bridge.
+_Avoid_: hostname guessing, pane SSH detection
+
+**Desktop Client**:
+A tmux client proven to run in the host's own graphical session: its process has a local display, no SSH connection and no sshd ancestor. Same-host opens use its display rather than the tmux server's environment, which may come from an SSH login or another client. A client that cannot be proven local is not one.
+_Avoid_: local pane, non-SSH session
 
 **Target Picker**:
 The tmux-facing workflow that scans visible terminal text for possible opener targets and asks the user to choose one.
@@ -84,7 +88,7 @@ Dev: Is this Ghostty-specific?
 Domain expert: No. Ghostty can display fallback terminal hyperlinks, but the Local Opener Bridge is an SSH-forwarded client protocol.
 
 Dev: Should the Remote Opener Plugin decide behavior by detecting whether the pane is SSH?
-Domain expert: No. It chooses bridge behavior from Bridge Availability, not from shell or hostname guesses.
+Domain expert: No. Panes and the tmux server environment are shared by every attached client. It asks whether the client that pressed the key is a Desktop Client, then uses Bridge Availability.
 
 Dev: Should a visible-pane picker send shell commands to the local desktop?
 Domain expert: No. The Target Picker chooses text, then the Remote Opener Plugin turns that text into an Open Request.

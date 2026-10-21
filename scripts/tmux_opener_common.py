@@ -51,6 +51,10 @@ IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".
 PIXEL_SUFFIXES = IMAGE_SUFFIXES | {".pdf"}
 # Terminals that draw kitty graphics through tmux with Unicode placeholders.
 PIXEL_TERMINAL_RE = re.compile(r"ghostty|kitty", re.IGNORECASE)
+PROC_ROOT = Path("/proc")
+# What desktop openers such as xdg-open need to reach a graphical session and its bus.
+DISPLAY_KEYS = ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION")
 
 
 def default_socket_path() -> str:
@@ -97,6 +101,36 @@ def default_ssh_host() -> str | None:
     for key in ("TMUX_OPENER_SSH_HOST", "VSCODE_SSH_HOST"):
         if value := os.environ.get(key):
             return value
+    return None
+
+
+def client_display_env() -> dict[str, str] | None:
+    """Return the display of the tmux client that pressed the key when it sits at this host's desktop.
+
+    The tmux server's environment belongs to whoever started or last attached it, possibly over
+    SSH, so the key binding passes the triggering client's PID instead. Anything short of proof of
+    a local graphical session (no /proc, an SSH ancestor, no local display) returns None.
+    """
+
+    pid = os.environ.get("TMUX_OPENER_CLIENT_PID", "")
+    if not pid.isdigit():
+        return None
+    try:
+        items = (PROC_ROOT / pid / "environ").read_text(errors="surrogateescape").split("\0")
+        environ = dict(item.split("=", 1) for item in items if "=" in item)
+        local_display = environ.get("WAYLAND_DISPLAY") or environ.get("DISPLAY", "").startswith(":")
+        if "SSH_CONNECTION" in environ or not local_display:
+            return None
+        for _ in range(64):
+            # comm sits in parentheses and may itself contain spaces or parentheses.
+            head, _, tail = (PROC_ROOT / pid / "stat").read_text(errors="replace").rpartition(")")
+            if head.partition("(")[2].startswith("sshd"):
+                return None
+            pid = tail.split()[1]
+            if pid in ("0", "1"):
+                return {key: environ[key] for key in DISPLAY_KEYS if key in environ}
+    except (OSError, IndexError):
+        pass
     return None
 
 
