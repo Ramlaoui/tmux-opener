@@ -14,10 +14,12 @@ import subprocess
 import sys
 
 from tmux_opener_common import (
+    DISPLAY_KEYS,
     bridge_available,
     build_request,
     build_download_requests,
     clean_selection,
+    client_display_env,
     default_log_path,
     default_socket_path,
     default_ssh_host,
@@ -50,7 +52,7 @@ def default_fallback_command() -> str | None:
 
 
 def default_bridge_policy() -> str:
-    return os.environ.get("TMUX_OPENER_BRIDGE_POLICY") or "always"
+    return os.environ.get("TMUX_OPENER_BRIDGE_POLICY") or "auto"
 
 
 def default_route_feedback() -> str:
@@ -73,16 +75,19 @@ def route_feedback(args: argparse.Namespace, message: str) -> None:
     tmux_message(message)
 
 
-def bridge_allowed(policy: str) -> bool:
-    if policy == "always":
+def bridge_allowed(args: argparse.Namespace) -> bool:
+    if args.bridge_policy == "always":
         return True
-    if policy == "local":
+    if args.bridge_policy == "local":
         return False
-    if policy == "ssh-client-only":
-        # Best-effort guard for mixed local/remote hosts. tmux server
-        # environments can be stale, so this is intentionally opt-in.
-        return bool(os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT"))
-    raise ValueError(f"unsupported bridge policy: {policy}")
+    # auto, and ssh-client-only from older configs: a client at the host's own desktop opens there.
+    return not args.desktop_client
+
+
+def bridge_refusal(args: argparse.Namespace, what: str) -> str:
+    if args.desktop_client and args.bridge_policy != "always":
+        return f"{what} go to an SSH client's desktop; this tmux client is on the host's own desktop"
+    return f"{what} require the local client bridge at {args.socket}"
 
 
 def system_open_command(target: str) -> list[str] | None:
@@ -208,8 +213,8 @@ def upload(args: argparse.Namespace, log_path: str | None) -> int:
     if args.print_request:
         print(json.dumps(request, indent=2, sort_keys=True))
         return 0
-    if not bridge_allowed(args.bridge_policy) or not bridge_available(args.socket, args.timeout):
-        tmux_message(f"uploads require the local client bridge at {args.socket}")
+    if not bridge_allowed(args) or not bridge_available(args.socket, args.timeout):
+        tmux_message(bridge_refusal(args, "uploads"))
         return 1
     try:
         capabilities = send_request(args.socket, {"version": 1, "action": "ping"}, args.timeout).get("capabilities")
@@ -240,7 +245,7 @@ def main() -> int:
     parser.add_argument("--fallback-command", default=default_fallback_command())
     parser.add_argument(
         "--bridge-policy",
-        choices=("always", "local", "ssh-client-only"),
+        choices=("auto", "always", "local", "ssh-client-only"),
         default=default_bridge_policy(),
         help="when to use the forwarded local opener bridge",
     )
@@ -255,6 +260,14 @@ def main() -> int:
     parser.add_argument("--print-request", action="store_true")
     args = parser.parse_args()
     log_path = None if args.no_log else args.log
+    display = client_display_env()
+    args.desktop_client = display is not None
+    if display is not None:
+        # Same-host opens appear where the key was pressed, even when the tmux server was
+        # started over SSH and has no display, or another client's, in its environment.
+        for key in DISPLAY_KEYS:
+            os.environ.pop(key, None)
+        os.environ.update(display)
 
     if args.upload:
         return upload(args, log_path)
@@ -284,8 +297,8 @@ def main() -> int:
         if args.print_request:
             print(json.dumps(requests, indent=2, sort_keys=True))
             return 0
-        if not bridge_allowed(args.bridge_policy) or not bridge_available(args.socket, args.timeout):
-            tmux_message(f"downloads require the local client bridge at {args.socket}")
+        if not bridge_allowed(args) or not bridge_available(args.socket, args.timeout):
+            tmux_message(bridge_refusal(args, "downloads"))
             return 1
         if any(request["action"] == "download_folder" for request in requests):
             try:
@@ -317,8 +330,9 @@ def main() -> int:
         print(json.dumps(request, indent=2, sort_keys=True))
         return 0
 
-    if not bridge_allowed(args.bridge_policy):
-        log_line(log_path, f"bridge skipped: policy={args.bridge_policy}; using fallback={args.fallback}")
+    if not bridge_allowed(args):
+        log_line(log_path, f"bridge skipped: policy={args.bridge_policy} desktop_client={args.desktop_client}; "
+                           f"using fallback={args.fallback}")
         return run_fallback(args, selection, log_path)
 
     if not bridge_available(args.socket, args.timeout):

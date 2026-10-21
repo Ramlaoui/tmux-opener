@@ -19,9 +19,11 @@ upload desktop files into the pane's directory.
 ```text
 remote tmux selection
   -> tmux-opener remote plugin
-  -> bridge available?
-     yes -> SSH RemoteForward Unix socket -> local opener client
-     no  -> same-host fallback opener
+  -> key pressed from the host's own desktop?
+     yes -> same-host opener on that desktop
+     no  -> bridge available?
+            yes -> SSH RemoteForward Unix socket -> local opener client
+            no  -> same-host fallback opener
 ```
 
 The remote side sends structured JSON Open Requests and Download Requests. It never sends arbitrary
@@ -337,6 +339,7 @@ Defaults:
 - Remote `localhost:PORT` URLs open through a local SSH `-L` tunnel
 - Fallback: if the bridge is unavailable, copy-mode uses same-host `open` or
   `xdg-open`
+- Bridge policy: `auto`; a tmux client at the host's own desktop opens there
 - Route feedback: tmux briefly displays which route was used
 
 Common tmux options:
@@ -349,12 +352,18 @@ set -g @tmux_opener_view_key 'i'
 set -g @tmux_opener_picker_key 'o'
 set -g @tmux_opener_upload_key 'P'
 set -g @tmux_opener_fallback 'auto' # or local, command, none
+set -g @tmux_opener_bridge_policy 'auto' # or always, local
 ```
 
-
-The copy-mode key does not try to infer whether the pane is SSH. It pings the
-forwarded socket; a successful ping means bridge path, and a failed ping means
-fallback path.
+The opener follows the tmux client that pressed the key, not the pane or the
+tmux server's environment. With `auto`, a client attached from the host's own
+graphical session (a local Wayland or X display and no SSH in its process
+ancestry) opens with the host's `xdg-open` on that display, even when the tmux
+server was started over SSH; its downloads and uploads are refused, since there
+is no remote desktop to send files to. Every other client pings the forwarded
+socket: a successful ping means bridge path, and a failed ping means fallback
+path. `always` uses the bridge for every client and `local` never does. The
+client check reads `/proc`, so other hosts keep the bridge path.
 
 ```sh
 tmux-opener-client --allow-ssh-host HOST
