@@ -44,6 +44,7 @@ nav = [
 
 [project.theme]
 language = "en"
+logo = "assets/brand/mark.svg"
 favicon = "assets/brand/mark.svg"
 font = false
 features = [
@@ -89,9 +90,6 @@ primary = "custom"
 accent = "custom"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to system preference"
-
-[project.theme.icon]
-logo = "lucide/square-arrow-out-up-right"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
