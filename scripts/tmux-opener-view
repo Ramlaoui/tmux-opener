@@ -11,6 +11,7 @@ import argparse
 import base64
 import csv
 import curses
+import functools
 import os
 import re
 import shutil
@@ -54,11 +55,6 @@ class Pdf:
     page: int = 1
 
 
-# Probing reads terminal replies that the key reader would take for key presses.
-# chafa sends raw pixels, so upscaling and its animations flood tmux and SSH: it
-# draws one frame at the image's own size, and play() animates with PNG frames.
-CHAFA_PIXELS = ["chafa", "--format=kitty", "--passthrough=tmux", "--probe=off", "--animate=off",
-                "--exact-size=on", "--align=mid,mid"]
 KITTY_REPLY_RE = re.compile(r"\x1b_G[^\x1b]*\x1b\\")
 # Browser roles as (256-color, 8-color) foregrounds on the terminal's own background.
 COLORS = {"folder": (75, curses.COLOR_BLUE), "image": (176, curses.COLOR_MAGENTA), "pdf": (167, curses.COLOR_RED),
@@ -239,6 +235,25 @@ def read_key() -> str:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, attributes)
 
 
+@functools.cache
+def chafa_pixels() -> list[str]:
+    """chafa's argv for real pixels.
+
+    Probing reads terminal replies that the key reader would take for key presses. chafa
+    1.16 added --probe and older versions reject it, but they never probe either.
+    chafa sends raw pixels, so upscaling and its animations flood tmux and SSH: it draws
+    one frame at the image's own size, and play() animates with PNG frames.
+    """
+
+    try:
+        usage = subprocess.run(["chafa", "--help"], capture_output=True, text=True, check=False).stdout
+    except OSError:
+        usage = ""
+    probe = ["--probe=off"] if "--probe" in usage else []
+    return ["chafa", "--format=kitty", "--passthrough=tmux", *probe, "--animate=off", "--exact-size=on",
+            "--align=mid,mid"]
+
+
 def page_pdf(view: Pdf) -> int:
     with tempfile.TemporaryDirectory(prefix="tmux-opener-pdf-") as folder:
         while True:
@@ -249,7 +264,7 @@ def page_pdf(view: Pdf) -> int:
                                 "-l", str(view.page), str(view.path), str(image.with_suffix(""))],
                                stderr=subprocess.DEVNULL, check=False)
             print("\x1b[H\x1b[2J", end="", flush=True)
-            subprocess.run([*CHAFA_PIXELS, f"--size={columns}x{rows - 1}", str(image)], check=False)
+            subprocess.run([*chafa_pixels(), f"--size={columns}x{rows - 1}", str(image)], check=False)
             status = f"{view.name}  page {view.page}/{view.pages}  space/b pages  g/G first/last  q close"
             print(f"\x1b[{rows};1H\x1b[2m{status[:columns]}\x1b[0m", end="", flush=True)
             page = view.page
@@ -705,7 +720,7 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     if suffix in IMAGE_SUFFIXES:
         columns, rows = size
         if pixels and which("chafa"):
-            return [*CHAFA_PIXELS, f"--size={columns}x{rows - 1}", str(path)], None
+            return [*chafa_pixels(), f"--size={columns}x{rows - 1}", str(path)], None
         if which("chafa"):
             # less needs a finished stream, so animations show their first frame.
             return ["chafa", "--format=symbols", "--animate=off", f"--size={columns}x{rows - 2}", str(path)], pager(name)
