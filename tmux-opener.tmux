@@ -103,7 +103,8 @@ fi
 popup_cmd="$picker_cmd; status=\$?; if [ \$status -eq 0 ] || [ \$status -eq 130 ]; then tmux display-popup -C; else printf '\n tmux-opener exited with status %s. Press Enter to close. ' \"\$status\"; read _; tmux display-popup -C; fi"
 tmux bind-key "$picker_key" display-popup -d "#{pane_current_path}" -w 90% -h 70% "$popup_cmd"
 
-dashboard_cmd="TMUX_OPENER_CWD=#{q:pane_current_path} TMUX_PANE=#{q:pane_id}"
+# display-popup does not expand formats in its command; resolve the pane inside the popup.
+dashboard_cmd="TMUX_OPENER_CWD=\"\$PWD\" TMUX_PANE=\"\$(tmux display-message -p '#{pane_id}')\""
 if [ -n "$socket_path" ]; then
   dashboard_cmd="$dashboard_cmd TMUX_OPENER_SOCKET=$(shell_quote "$socket_path")"
 fi
