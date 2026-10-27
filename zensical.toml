@@ -1,0 +1,125 @@
+[project]
+site_name = "tmux-opener"
+site_description = "Press a key in remote tmux and it opens on your laptop: URLs in your browser, files in VS Code, downloads in your Downloads folder."
+site_url = "https://tmux-opener.ramlaoui.org/"
+site_author = "Ali Ramlaoui"
+repo_url = "https://github.com/Ramlaoui/tmux-opener"
+repo_name = "Ramlaoui/tmux-opener"
+edit_uri = "edit/main/docs/"
+copyright = "Copyright &copy; 2026 Ali Ramlaoui"
+docs_dir = "docs"
+extra_css = ["stylesheets/extra.css"]
+extra_javascript = ["javascripts/media.js"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = [
+    "getting-started/installation.md",
+    "getting-started/quickstart.md",
+  ] },
+  { "Guides" = [
+    "guides/open.md",
+    "guides/picker.md",
+    "guides/inline-view.md",
+    "guides/downloads.md",
+    "guides/uploads.md",
+    "guides/dashboards.md",
+    "guides/opener-rules.md",
+    "guides/vimtex.md",
+  ] },
+  { "Reference" = [
+    "reference/keys-and-options.md",
+    "reference/cli.md",
+    "reference/security.md",
+  ] },
+  { "Troubleshooting" = "troubleshooting.md" },
+  { "Project" = [
+    { "Client archive" = "client-artifact.md" },
+    { "Plugin archive" = "server-plugin-artifact.md" },
+    { "Releasing" = "releasing.md" },
+    { "ADR 0001: trust model" = "adr/0001-local-opener-bridge-trust-model.md" },
+    { "ADR 0002: SSH config wiring" = "adr/0002-ssh-config-owns-host-socket-wiring.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+logo = "assets/brand/mark.svg"
+favicon = "assets/brand/mark.svg"
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tabs.link",
+  "content.tooltips",
+  "content.action.edit",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+# Dark first: the product lives in a terminal.
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.theme.font]
+text = "IBM Plex Sans"
+code = "JetBrains Mono"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/Ramlaoui/tmux-opener"
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tasklist.custom_checkbox = true

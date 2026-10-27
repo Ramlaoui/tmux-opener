@@ -1,0 +1,10 @@
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AuthorizedKeysFile /etc/ssh/demo_keys/%u
+AllowStreamLocalForwarding yes
+AllowTcpForwarding yes
+StreamLocalBindUnlink yes
+AcceptEnv LANG LC_* TMUX_OPENER_*
+PrintMotd no
+PrintLastLog no

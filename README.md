@@ -4,6 +4,9 @@ Open URLs and remote file paths from tmux copy mode on an SSH host using your
 local desktop browser or VS Code Remote-SSH, download files to your desktop, or
 upload desktop files into the pane's directory.
 
+Documentation, with recordings of every feature:
+[tmux-opener.ramlaoui.org](https://tmux-opener.ramlaoui.org/).
+
 ## Contents
 
 - [How It Works](#how-it-works)
