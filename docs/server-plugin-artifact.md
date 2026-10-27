@@ -41,7 +41,9 @@ The Clients view reports the connected desktop opener process; `r` restarts it
 and `R` restarts all online clients shown (only the bridged client in remote
 mode). Restarts preserve the client's options and native supervisor. Active
 transfers become interrupted and can be retried. A remote dashboard cannot
-restart other desktop clients.
+restart other desktop clients. `u` fast-forwards this host's plugin, when it is
+a git checkout, to its tracked branch and reloads its tmux bindings
+(`scripts/tmux-opener-update`).
 
 The `--once` and `--json` modes are available for noninteractive checks:
 

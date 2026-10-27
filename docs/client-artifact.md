@@ -116,6 +116,12 @@ controls. The responding owner acknowledges first, cleans up its socket and
 transfers, then re-executes with its original options under the same supervisor.
 Active transfers become interrupted and retain partial copies for retry.
 
+**Update plugin** on a client card, or `u` in the tmux dashboard's Clients view,
+fast-forwards the selected bridged host's git-installed tmux plugin to its
+tracked branch and reloads its tmux bindings. The dashboard pipes this archive's
+`scripts/tmux-opener-update` to the host over batch-mode SSH, with forwarding
+and connection sharing disabled; release-archive installs are refused.
+
 The local dashboards can also add a bridge: **Add bridge** in the browser, or
 `a` in the terminal dashboard's Clients view, picks a concrete `Host` alias from
 `~/.ssh/config` (or `--ssh-config PATH`) and runs

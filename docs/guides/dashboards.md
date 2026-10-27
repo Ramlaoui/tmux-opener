@@ -20,6 +20,7 @@ Press <kbd>prefix</kbd> <kbd>O</kbd> (capital O) to open the live dashboard in a
 | <kbd>c</kbd> | Cancel the selected transfer |
 | <kbd>r</kbd> | Retry a failed, cancelled or interrupted transfer; in Clients, restart the selected client |
 | <kbd>R</kbd> | In Clients, restart all online clients shown |
+| <kbd>u</kbd> | In Clients, [update the plugin](#update-the-plugin) |
 | <kbd>q</kbd> | Close |
 
 The host dashboard reaches only the client behind its forwarded bridge. It shows that client's machine, user, OS and process, the current host and pane, and recent transfers with progress bars.
@@ -50,6 +51,12 @@ The Clients page shows each desktop client process and its recent host activity,
 **Add bridge** on the browser Clients page, or <kbd>a</kbd> in the terminal dashboard's Clients view, lists the concrete `Host` aliases in `~/.ssh/config` (following `Include`, skipping wildcard and negated patterns) and marks those that already have a bridge. Type to filter and pick a host: the dashboard runs `tmux-opener install-host --start-client HOST`, and you connect with a plain `ssh HOST`.
 
 An existing, conflicting `RemoteForward` is reported rather than overwritten. Pass `--ssh-config PATH` to list another config. The host dashboard cannot add bridges, because a forwarded session must not edit your laptop's SSH config.
+
+## Update the plugin
+
+**Update plugin** on a browser client card, or <kbd>u</kbd> in a terminal dashboard's Clients view, updates the Remote Opener Plugin the way TPM does: it fast-forwards the plugin's git checkout to its tracked branch (usually `main`) and reloads its tmux bindings.
+
+The laptop dashboards update the selected host by piping `scripts/tmux-opener-update` over the same batch-mode SSH that downloads use, so the host must accept key or agent authentication. The host dashboard updates its own host. The update refuses release-archive installs and checkouts whose local changes would be overwritten, and reports the old and new commits. Restart the laptop client separately when its install changes too.
 
 ## Openers
 

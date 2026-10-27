@@ -1,0 +1,57 @@
+#!/bin/sh
+# Fast-forward a git-installed Remote Opener Plugin to its tracked branch, like
+# TPM's update, then reload its tmux bindings. The host dashboard runs this
+# file; desktop dashboards pipe it to a bridged host as `sh -s` over SSH, so it
+# must locate the plugin without relying on its own path.
+set -u
+
+plugin_dir() {
+  case $0 in
+    */tmux-opener-update)
+      dir=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd) && [ -f "$dir/tmux-opener.tmux" ] && {
+        printf '%s\n' "$dir"; return 0; } ;;
+  esac
+  tpm=$(tmux show-environment -g TMUX_PLUGIN_MANAGER_PATH 2>/dev/null | sed -n 's/^TMUX_PLUGIN_MANAGER_PATH=//p')
+  for dir in "$(tmux show-option -gqv @tmux_opener_dir 2>/dev/null)" "${tpm:+${tpm%/}/tmux-opener}" \
+      "$HOME/.tmux/plugins/tmux-opener" "${XDG_CONFIG_HOME:-$HOME/.config}/tmux/plugins/tmux-opener"; do
+    if [ -n "$dir" ] && [ -f "$dir/tmux-opener.tmux" ]; then
+      printf '%s\n' "$dir"; return 0
+    fi
+  done
+  return 1
+}
+
+host=$(hostname 2>/dev/null || echo host)
+if ! dir=$(plugin_dir); then
+  echo "tmux-opener plugin not found on $host"
+  exit 1
+fi
+if [ ! -e "$dir/.git" ]; then
+  echo "$dir on $host is not a git checkout; install the latest release archive instead"
+  exit 1
+fi
+
+before=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)
+# Never prompt: a dashboard has no terminal to answer credential questions.
+if ! output=$(GIT_TERMINAL_PROMPT=0 git -C "$dir" pull --ff-only --quiet </dev/null 2>&1); then
+  # Git's first error names the cause; its last line is often just "Aborting".
+  reason=$(printf '%s\n' "$output" | grep -m 1 -E '^(fatal|error):') ||
+    reason=$(printf '%s\n' "$output" | sed '/^[[:space:]]*$/d' | tail -n 1)
+  echo "update failed on $host: $reason"
+  exit 1
+fi
+after=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)
+
+reload="no tmux server to reload"
+if tmux list-sessions >/dev/null 2>&1; then
+  if "$dir/tmux-opener.tmux" >/dev/null 2>&1; then
+    reload="bindings reloaded"
+  else
+    reload="reloading bindings failed"
+  fi
+fi
+if [ "$before" = "$after" ]; then
+  echo "tmux-opener on $host is up to date ($after); $reload"
+else
+  echo "tmux-opener on $host updated $before -> $after; $reload"
+fi

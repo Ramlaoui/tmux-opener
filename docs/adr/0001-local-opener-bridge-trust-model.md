@@ -15,3 +15,8 @@ files in a local dialog that shows the destination, so a remote session cannot
 read desktop files the user did not choose. Dropping files onto a terminal is
 not supported, because it would need the remote to ask for local paths. Uploads
 use the same fixed SSH command and never replace existing remote files.
+
+Plugin Updates go the other way and only start from a desktop dashboard. The
+dashboard pipes its own update script to a bridged host alias over batch-mode
+SSH, and nothing in the command comes from the host. The client socket has no
+update action, so a remote session cannot trigger one.

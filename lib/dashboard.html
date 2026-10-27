@@ -153,6 +153,7 @@
     .client { padding: 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
     .client-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
     .client-head h2 { font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
+    .client-actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .pill.online { background: var(--good-soft); color: var(--good); }
     .pill.offline { background: var(--sunken); color: var(--muted); }
     .kv { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 6px 12px; font-size: 13px; margin: 0; }
@@ -399,6 +400,23 @@
         }
       };
 
+      const updatingPlugins = new Set();
+      const updatePlugin = async (client) => {
+        if (updatingPlugins.has(client.host)) return;
+        updatingPlugins.add(client.host);
+        clientMessages.delete(client.socket);
+        renderClients();
+        try {
+          const body = await api("/api/plugin-update", { method: "POST", body: JSON.stringify({ host: client.host }) });
+          clientMessages.set(client.socket, text(body.message, "Plugin updated"));
+        } catch (error) {
+          clientMessages.set(client.socket, error.message);
+        } finally {
+          updatingPlugins.delete(client.host);
+          renderClients();
+        }
+      };
+
       /* Transfers ---------------------------------------------------- */
       const renderFilters = () => {
         const root = $("filters");
@@ -550,7 +568,17 @@
         restart.disabled = !restartable(client);
         restart.title = client.can_restart ? "Restart this client with its current configuration" : "Restart unavailable: client offline or needs an update";
         restart.addEventListener("click", () => restartClients(client));
-        card.append(restart);
+        const actions = el("div", "client-actions");
+        actions.append(restart);
+        if (client.can_update) {
+          const update = el("button", "btn", updatingPlugins.has(client.host) ? "Updating plugin…" : "Update plugin");
+          update.type = "button";
+          update.disabled = updatingPlugins.has(client.host);
+          update.title = `Fast-forward tmux-opener on ${text(client.host)} over SSH and reload its tmux bindings`;
+          update.addEventListener("click", () => updatePlugin(client));
+          actions.append(update);
+        }
+        card.append(actions);
         if (clientMessages.has(client.socket)) card.append(el("div", "muted", clientMessages.get(client.socket)));
         if (client.error) card.append(el("div", "alert bad", client.error));
         if (client.history_error) card.append(el("div", "alert warn", `Transfer history: ${client.history_error}`));

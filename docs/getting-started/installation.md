@@ -78,7 +78,7 @@ Make sure `~/.local/bin` is on your `PATH`, then [connect to a host](quickstart.
 
 ## Updating
 
-Update both sides together, since new features usually need a newer plugin and a newer client. After updating:
+Update both sides together, since new features usually need a newer plugin and a newer client. A TPM install can also be updated from the [dashboards](../guides/dashboards.md#update-the-plugin). After updating by hand:
 
 ```sh
 tmux-opener restart-client HOST                               # on the laptop
