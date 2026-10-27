@@ -239,19 +239,19 @@ def read_key() -> str:
 def chafa_pixels() -> list[str]:
     """chafa's argv for real pixels.
 
-    Probing reads terminal replies that the key reader would take for key presses. chafa
-    1.16 added --probe and older versions reject it, but they never probe either.
+    Probing reads terminal replies that the key reader would take for key presses.
     chafa sends raw pixels, so upscaling and its animations flood tmux and SSH: it draws
     one frame at the image's own size, and play() animates with PNG frames.
+    chafa 1.16 added --probe. Older versions reject it and never probe, and their
+    --exact-size=on draws a 9999-pixel-wide frame, hundreds of MB; they fit the view instead.
     """
 
     try:
         usage = subprocess.run(["chafa", "--help"], capture_output=True, text=True, check=False).stdout
     except OSError:
         usage = ""
-    probe = ["--probe=off"] if "--probe" in usage else []
-    return ["chafa", "--format=kitty", "--passthrough=tmux", *probe, "--animate=off", "--exact-size=on",
-            "--align=mid,mid"]
+    sizing = ["--probe=off", "--exact-size=on"] if "--probe" in usage else []
+    return ["chafa", "--format=kitty", "--passthrough=tmux", *sizing, "--animate=off", "--align=mid,mid"]
 
 
 def page_pdf(view: Pdf) -> int:
