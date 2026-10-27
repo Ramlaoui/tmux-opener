@@ -422,9 +422,11 @@ def test_tmux_dashboard_binding_is_installed_by_a_real_tmux_server() -> None:
         assert "-T prefix O       display-popup -E" in prefix_keys
         assert "tmux-opener-status" in prefix_keys
         # display-popup does not expand formats in its command, so the popup resolves them itself.
-        assert 'TMUX_OPENER_CWD=\\"\\$PWD\\"' in prefix_keys
-        assert "TMUX_PANE=\\\"$(tmux display-message -p '#{pane_id}')\\\"" in prefix_keys
+        # list-keys escaping differs between tmux versions, so compare without backslashes.
         dashboard_binding = next(line for line in prefix_keys.splitlines() if "tmux-opener-status" in line)
+        unescaped = dashboard_binding.replace("\\", "")
+        assert 'TMUX_OPENER_CWD="$PWD"' in unescaped
+        assert "TMUX_PANE=\"$(tmux display-message -p '#{pane_id}')\"" in unescaped
         assert "#{q:" not in dashboard_binding
     finally:
         subprocess.run([tmux, "-L", server_name, "kill-server"], check=False)
