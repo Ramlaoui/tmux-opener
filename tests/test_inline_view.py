@@ -72,6 +72,20 @@ def test_tables_json_binary_and_images_pick_matching_viewers(tmp_path: Path) -> 
     assert VIEW["plan"](tmp_path, None, which_only())[0] == VIEW["Folder"](tmp_path.absolute(), False)
 
 
+@pytest.mark.parametrize(("usage", "probe"), [("  --probe=BOOL  Probe terminal", True), ("  --polite=BOOL", False)])
+def test_chafa_pixels_use_probe_and_exact_size_only_from_chafa_1_16(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, usage: str, probe: bool
+) -> None:
+    # chafa 1.14, in Debian trixie, rejects --probe=off, and its --exact-size=on frames are huge.
+    chafa = tmp_path / "chafa"
+    chafa.write_text(f"#!/bin/sh\necho '{usage}'\n")
+    chafa.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    argv = VIEW["chafa_pixels"].__wrapped__()
+    assert argv[:3] == ["chafa", "--format=kitty", "--passthrough=tmux"]
+    assert ("--probe=off" in argv) is probe and ("--exact-size=on" in argv) is probe
+
+
 def test_popup_runs_the_viewer_with_a_quoted_path(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     monkeypatch.setattr(common.sys.stdin, "isatty", lambda: False)

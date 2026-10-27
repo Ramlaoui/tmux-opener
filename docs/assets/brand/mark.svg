@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="tmux-opener">
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="#10251c"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="15.25" fill="none" stroke="#365b46" stroke-width="1.5"/>
+  <path d="m16 29 9 9-9 9m15 0h8" fill="none" stroke="#effaf3" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m34 30 14-14m-13 0h13v13" fill="none" stroke="#79e5a2" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,10 @@
+export LANG=C.UTF-8 EDITOR=vi
+# A short prompt keeps every recording readable.
+PS1='\[\e[38;5;114m\]\u@\h\[\e[0m\] \[\e[38;5;179m\]\w\[\e[0m\] \$ '
+alias ls='ls --color=auto' ll='ls -lh --color=auto'
+HISTFILE=/dev/null
+# Land in the shared demo session on login.
+if [ -z "${TMUX:-}" ] && [ -t 0 ] && [ -z "${DEMO_NO_TMUX:-}" ]; then
+  cd ~/vision-lab
+  exec tmux new-session -A -s lab -c ~/vision-lab
+fi

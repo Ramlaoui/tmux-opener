@@ -1,0 +1,125 @@
+/* A quiet, neutral theme: the recordings carry the page. */
+
+[data-md-color-primary="custom"] {
+  --md-primary-fg-color: #ffffff;
+  --md-primary-fg-color--light: #f6f8fa;
+  --md-primary-fg-color--dark: #eaeef2;
+  --md-primary-bg-color: #1f2328;
+  --md-primary-bg-color--light: #59636e;
+}
+
+[data-md-color-accent="custom"] {
+  --md-accent-fg-color: #0969da;
+  --md-accent-fg-color--transparent: #0969da1a;
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: #ffffffb3;
+}
+
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: #0969da;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 215;
+  --md-default-bg-color: #0d1117;
+  --md-code-bg-color: #161b22;
+  --md-footer-bg-color: #0d1117;
+  --md-footer-bg-color--dark: #010409;
+}
+
+[data-md-color-scheme="slate"][data-md-color-primary="custom"] {
+  --md-primary-fg-color: #0d1117;
+  --md-primary-fg-color--light: #161b22;
+  --md-primary-fg-color--dark: #010409;
+  --md-primary-bg-color: #e6edf3;
+  --md-primary-bg-color--light: #9198a1;
+  --md-typeset-a-color: #4493f8;
+}
+
+[data-md-color-scheme="slate"][data-md-color-accent="custom"] {
+  --md-accent-fg-color: #4493f8;
+  --md-accent-fg-color--transparent: #4493f81a;
+}
+
+.md-header,
+.md-tabs {
+  box-shadow: none;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+/* Buttons: one solid, one outlined, in the text colour. */
+.md-typeset .md-button {
+  border-radius: 6px;
+  border-color: var(--md-default-fg-color--lighter);
+  color: var(--md-default-fg-color);
+  font-weight: 600;
+}
+
+.md-typeset .md-button--primary,
+.md-typeset .md-button:hover {
+  background: var(--md-default-fg-color);
+  border-color: var(--md-default-fg-color);
+  color: var(--md-default-bg-color);
+}
+
+/* Recordings and screenshots. */
+.md-typeset video.demo,
+.md-typeset img.demo {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 1rem 0 1.5rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  max-width: 44rem;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
+/* Home: a modest hero, then the demos two by two. Click any of them for full size. */
+.md-typeset video.demo.hero {
+  max-width: 48rem;
+}
+
+.md-typeset .demos {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem 2.5rem;
+  margin-top: 2.5rem;
+}
+
+.md-typeset .demos h3 {
+  margin-top: 0.5rem;
+}
+
+.md-typeset .demos p {
+  margin: 0.4rem 0;
+}
+
+.md-typeset .demos video.demo {
+  margin: 0.6rem 0 1.5rem;
+}
+
+@media screen and (max-width: 44.9375em) {
+  .md-typeset .demos {
+    grid-template-columns: 1fr;
+  }
+}
+
+.zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2vmin;
+  background: rgba(0, 0, 0, 0.85);
+  cursor: zoom-out;
+}
+
+.zoom img,
+.zoom video {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 8px;
+}
