@@ -7,10 +7,7 @@ description: Preview files, images, PDFs, tables and folders in a tmux popup on 
 
 Select a path in copy mode and press <kbd>i</kbd> to view it on the host in a large tmux popup. Nothing crosses the bridge and nothing opens on your laptop; <kbd>q</kbd> closes the view.
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>demo@devbox: inline view</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/inline-view.webp" aria-label="Inline view shows a figure and a PDF in the terminal"><source src="../assets/media/inline-view.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/inline-view.webp" aria-label="Inline view plays a GIF, then shows a PDF and a folder in the terminal"><source src="../assets/media/inline-view.mp4" type="video/mp4"></video>
 
 The viewer picks the best tool the host has:
 
@@ -21,6 +18,7 @@ The viewer picks the best tool the host has:
 | `.md` | `glow` when installed, otherwise a built-in renderer |
 | `.json` | `jq`, otherwise Python's `json.tool` |
 | images | `chafa` or `timg`; real pixels in Ghostty or kitty |
+| `.gif` | Animated in Ghostty or kitty when the host has `ffmpeg` |
 | `.pdf` | Pages in real pixels with `pdftoppm` and `chafa` in Ghostty or kitty, otherwise `pdftotext` |
 | binary | File type and size instead of raw bytes |
 | folders | A file browser with a preview pane |
@@ -29,7 +27,7 @@ The viewer picks the best tool the host has:
 
 ## Images and PDFs in pixels
 
-In Ghostty and kitty, `chafa` draws images with the terminal's graphics protocol. tmux keeps graphics out of popups, so image and PDF views open in a tmux window instead. In a PDF, <kbd>space</kbd>/<kbd>b</kbd> or the arrows change page, <kbd>g</kbd>/<kbd>G</kbd> jump to the first or last page, and `report.pdf:3` opens page 3.
+In Ghostty and kitty, `chafa` draws images with the terminal's graphics protocol. tmux keeps graphics out of popups, so image and PDF views open in a tmux window instead. GIFs play and loop when `ffmpeg` and `ffprobe` are installed, one frame at a time, so a slow link lowers the frame rate instead of the view lagging. In a PDF, <kbd>space</kbd>/<kbd>b</kbd> or the arrows change page, <kbd>g</kbd>/<kbd>G</kbd> jump to the first or last page, and `report.pdf:3` opens page 3.
 
 ## Tables
 

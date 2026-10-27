@@ -23,7 +23,7 @@ Optional extras:
 
 - VS Code's `code` CLI with the Remote-SSH extension, to open files at a line
 - `fzf` on the host for the [target picker](../guides/picker.md)
-- `bat`, `chafa`, `pdftoppm` and `glow` on the host for richer [inline views](../guides/inline-view.md)
+- `bat`, `chafa`, `pdftoppm`, `ffmpeg` and `glow` on the host for richer [inline views](../guides/inline-view.md)
 - Neovim, VimTeX and `uv` on the host for [LaTeX PDF preview](../guides/vimtex.md)
 
 ## On the SSH host

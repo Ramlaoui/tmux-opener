@@ -2,15 +2,15 @@
 // Escape to close. Delegated from the document so it keeps working across
 // instant navigation.
 document.addEventListener("click", (event) => {
-  const media = event.target.closest(".to-window img, .to-window video, img.to-shot");
-  const open = document.querySelector(".to-zoom");
+  const media = event.target.closest(".demo");
+  const open = document.querySelector(".zoom");
   if (open) {
     open.remove();
     return;
   }
   if (!media) return;
   const overlay = document.createElement("div");
-  overlay.className = "to-zoom";
+  overlay.className = "zoom";
   overlay.setAttribute("role", "dialog");
   overlay.setAttribute("aria-label", media.getAttribute("aria-label") || media.alt || "Recording");
   const full = media.cloneNode(true);
@@ -23,7 +23,7 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") document.querySelector(".to-zoom")?.remove();
+  if (event.key === "Escape") document.querySelector(".zoom")?.remove();
 });
 
 // Play recordings only while they are on screen, and respect reduced motion.
@@ -37,7 +37,7 @@ const watcher = new IntersectionObserver((entries) => {
 }, { threshold: 0.25 });
 
 function watchVideos() {
-  for (const video of document.querySelectorAll(".to-window video")) {
+  for (const video of document.querySelectorAll("video.demo")) {
     if (video.dataset.watched) continue;
     video.dataset.watched = "1";
     if (reduceMotion.matches) video.removeAttribute("autoplay");

@@ -11,10 +11,7 @@ tmux-opener has three views of the same state: a tmux popup on the host, a termi
 
 Press <kbd>prefix</kbd> <kbd>O</kbd> (capital O) to open the live dashboard in a popup.
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>demo@devbox: dashboard</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/dashboard.webp" aria-label="The tmux dashboard shows transfers, clients and opener rules"><source src="../assets/media/dashboard.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/dashboard.webp" aria-label="The tmux dashboard shows transfers, clients and opener rules"><source src="../assets/media/dashboard.mp4" type="video/mp4"></video>
 
 | Key | Action |
 | --- | --- |
@@ -34,10 +31,7 @@ tmux-opener dashboard          # every desktop client
 tmux-opener dashboard devbox   # one host's client
 ```
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>tmux-opener dashboard: Transfers</span></div>
-<img src="../assets/media/dashboard-transfers.webp" alt="The browser dashboard listing completed and running transfers" loading="lazy">
-</div>
+<img class="demo" src="../assets/media/dashboard-transfers.webp" alt="The browser dashboard listing completed and running transfers" loading="lazy">
 
 The page runs on a temporary loopback port and is protected by a random token, so other local users and web pages cannot drive it. It polls every client socket on the laptop, including custom sockets in managed SSH snippets, and also lists configured clients that are offline. `--no-browser` prints the URL instead of opening it. Keep the command running while you use the page; <kbd>Ctrl</kbd>+<kbd>C</kbd> stops it.
 
@@ -45,10 +39,7 @@ For the same views in a terminal, run `tmux-opener terminal-dashboard`, or press
 
 ## Clients
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>tmux-opener dashboard: Clients</span></div>
-<img src="../assets/media/dashboard-clients.webp" alt="The Clients page with an online desktop client and its recent host activity" loading="lazy">
-</div>
+<img class="demo" src="../assets/media/dashboard-clients.webp" alt="The Clients page with an online desktop client and its recent host activity" loading="lazy">
 
 The Clients page shows each desktop client process and its recent host activity, with **Restart client** and **Restart all online clients**. Restarts keep the startup options and native service supervision. Active transfers are interrupted; retry them from Transfers to resume their partial copies.
 
@@ -64,7 +55,4 @@ An existing, conflicting `RemoteForward` is reported rather than overwritten. Pa
 
 The Openers page edits the desktop's [opener rules](opener-rules.md), VS Code window policies, PDF viewer and download notifications.
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>tmux-opener dashboard: Openers</span></div>
-<img src="../assets/media/dashboard-openers.webp" alt="The Openers page with path rules and viewer settings" loading="lazy">
-</div>
+<img class="demo" src="../assets/media/dashboard-openers.webp" alt="The Openers page with path rules and viewer settings" loading="lazy">

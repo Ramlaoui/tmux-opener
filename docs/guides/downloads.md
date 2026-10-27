@@ -10,10 +10,7 @@ Select one or more paths in copy mode and press:
 - <kbd>d</kbd> to download into your laptop's **Downloads** folder (Linux honours the XDG Downloads setting),
 - <kbd>D</kbd> to choose the destination in a **save dialog on your laptop**.
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>demo@devbox → demo-mac</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/download.webp" aria-label="Pressing d downloads the selected files to the laptop with a notification"><source src="../assets/media/download.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/download.webp" aria-label="Pressing d downloads the selected files to the laptop with a notification"><source src="../assets/media/download.mp4" type="video/mp4"></video>
 
 tmux confirms that the transfer was queued. Your laptop shows a notification when it finishes or fails (Notification Center on macOS, `notify-send` on Linux).
 
@@ -28,10 +25,7 @@ URLs are rejected: open them instead.
 
 ## Choose where to save
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>demo-mac: save dialog</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/save-as.webp" aria-label="Pressing D opens a native save dialog on the laptop"><source src="../assets/media/save-as.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/save-as.webp" aria-label="Pressing D opens a native save dialog on the laptop"><source src="../assets/media/save-as.mp4" type="video/mp4"></video>
 
 <kbd>D</kbd> opens the native save dialog on macOS, and `zenity`, `kdialog` or Python Tk on Linux and Windows. It asks once per file. Cancelling a dialog skips that file. Existing files are never overwritten: choose a new name.
 

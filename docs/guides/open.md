@@ -18,19 +18,13 @@ tmux briefly shows the route it used, for example *opened via local opener bridg
 
 ## URLs in your browser
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>browser</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/open-url.webp" aria-label="A URL selected in tmux opens in the laptop's browser"><source src="../assets/media/open-url.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/open-url.webp" aria-label="A URL selected in tmux opens in the laptop's browser"><source src="../assets/media/open-url.mp4" type="video/mp4"></video>
 
 By default the client accepts only `http` and `https` URLs, so a remote session cannot launch arbitrary local URL handlers. Start the client with `--allow-url-scheme SCHEME` to allow another scheme.
 
 ## Files and folders in VS Code
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>VS Code · SSH: devbox</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/open-vscode.webp" aria-label="A traceback path opens VS Code Remote-SSH at the failing line"><source src="../assets/media/open-vscode.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/open-vscode.webp" aria-label="A traceback path opens VS Code Remote-SSH at the failing line"><source src="../assets/media/open-vscode.mp4" type="video/mp4"></video>
 
 Select a path from a traceback, a compiler error or `grep -n` output. tmux-opener understands `path`, `path:line` and `path:line:column`, and resolves relative paths against the pane's working directory on the host.
 
@@ -44,10 +38,7 @@ VS Code needs the `code` CLI and the Remote-SSH extension on your laptop. Withou
 
 ## Remote localhost URLs
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>browser · 127.0.0.1:18888</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/localhost.webp" aria-label="A localhost URL on the host opens through an SSH tunnel"><source src="../assets/media/localhost.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/localhost.webp" aria-label="A localhost URL on the host opens through an SSH tunnel"><source src="../assets/media/localhost.mp4" type="video/mp4"></video>
 
 `localhost` printed on the host means the host. When you open `http://localhost:8888/?token=…`, `127.0.0.1:6006` or `localhost:8080`, the client:
 

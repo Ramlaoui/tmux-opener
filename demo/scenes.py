@@ -167,9 +167,9 @@ def picker() -> None:
 def inline_view() -> None:
     reset()
     run("find figures paper runs -maxdepth 1 | sort", settle=1.2)
-    select("figures/samples.png")
+    select("figures/training.gif")
     copy_key("i")
-    pause(4.5)
+    pause(6.0)
     press("q")
     pause(1.0)
     select("paper/report.pdf")

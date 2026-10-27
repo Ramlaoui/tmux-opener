@@ -5,7 +5,7 @@ FROM debian:trixie-slim
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       openssh-server tmux git python3 python-is-python3 python3-matplotlib fzf bat chafa poppler-utils jq rsync less \
-      curl wget ca-certificates procps file tree \
+      curl wget ca-certificates procps file tree ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/bin/batcat /usr/local/bin/bat \
     && useradd --create-home --shell /bin/bash demo \

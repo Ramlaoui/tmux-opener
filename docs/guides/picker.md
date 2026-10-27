@@ -7,10 +7,7 @@ description: Choose any URL or path visible in the pane with fzf, without enteri
 
 Press <kbd>prefix</kbd> <kbd>o</kbd> to open a popup listing every URL and path in the visible pane. Type to filter, press <kbd>Enter</kbd>, and the target opens exactly as if you had selected it and pressed <kbd>o</kbd>.
 
-<div class="to-window">
-<div class="to-bar"><i></i><i></i><i></i><span>demo@devbox: ~/vision-lab</span></div>
-<video autoplay loop muted playsinline preload="metadata" poster="../../assets/media/picker.webp" aria-label="The fzf target picker lists URLs and paths from the pane"><source src="../assets/media/picker.mp4" type="video/mp4"></video>
-</div>
+<video class="demo" autoplay loop muted playsinline preload="metadata" poster="../../assets/media/picker.webp" aria-label="The fzf target picker lists URLs and paths from the pane"><source src="../assets/media/picker.mp4" type="video/mp4"></video>
 
 The picker needs `fzf` on the host. It only chooses text: the choice then goes through the same [Open Request](open.md) path, with the same client checks.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import random
@@ -44,8 +45,8 @@ acc = [min(0.94, 0.42 + 0.5 * (1 - math.exp(-e / 9)) + random.uniform(-0.01, 0.0
 lrs = [3e-4 * 0.5 * (1 + math.cos(math.pi * e / 50)) for e in epochs]
 
 
-def loss_figure(path: Path, upto: int = 50, title: str = "exp-42 · ViT-S/16 on tiny-scenes") -> None:
-    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=150, facecolor=INK)
+def loss_figure(path, upto: int = 50, title: str = "exp-42 · ViT-S/16 on tiny-scenes", dpi: int = 150) -> None:
+    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=dpi, facecolor=INK)
     dark_axes(ax)
     ax.plot(epochs[:upto], train[:upto], color=GREEN, linewidth=2.2, label="train loss")
     ax.plot(epochs[:upto], val[:upto], color=AMBER, linewidth=2.2, label="val loss")
@@ -77,6 +78,19 @@ def confusion_figure(path: Path) -> None:
     fig.tight_layout()
     fig.savefig(path, facecolor=INK)
     plt.close(fig)
+
+
+def training_gif(path: Path) -> None:
+    """The loss curves drawn epoch by epoch, to show the inline viewer playing a GIF."""
+    from PIL import Image
+
+    frames = []
+    for upto in range(2, 51, 2):
+        buffer = io.BytesIO()
+        loss_figure(buffer, upto=upto, title=f"exp-42 · epoch {upto}", dpi=100)
+        frames.append(Image.open(buffer).convert("RGB"))
+    durations = [90] * (len(frames) - 1) + [1500]
+    frames[0].save(path, save_all=True, append_images=frames[1:], duration=durations, loop=0)
 
 
 def samples_figure(path: Path) -> None:
@@ -149,6 +163,7 @@ def report(path: Path) -> None:
 loss_figure(root / "figures" / "loss.png")
 confusion_figure(root / "figures" / "confusion.png")
 samples_figure(root / "figures" / "samples.png")
+training_gif(root / "figures" / "training.gif")
 (root / "paper").mkdir(exist_ok=True)
 report(root / "paper" / "report.pdf")
 

@@ -1,6 +1,6 @@
 [project]
 site_name = "tmux-opener"
-site_description = "Press a key in remote tmux and it opens on your laptop: URLs in your browser, files in VS Code, downloads in your Downloads folder."
+site_description = "Select a URL, a path or a file in tmux on an SSH host, press a key, and it opens on your laptop."
 site_url = "https://tmux-opener.ramlaoui.org/"
 site_author = "Ali Ramlaoui"
 repo_url = "https://github.com/Ramlaoui/tmux-opener"
@@ -44,8 +44,8 @@ nav = [
 
 [project.theme]
 language = "en"
-logo = "assets/brand/mark.svg"
 favicon = "assets/brand/mark.svg"
+font = false
 features = [
   "content.code.annotate",
   "content.code.copy",
@@ -65,7 +65,7 @@ features = [
   "toc.follow",
 ]
 
-# Dark first: the product lives in a terminal.
+# Follow the system light or dark setting.
 [[project.theme.palette]]
 media = "(prefers-color-scheme)"
 scheme = "slate"
@@ -90,9 +90,8 @@ accent = "custom"
 toggle.icon = "lucide/moon"
 toggle.name = "Switch to system preference"
 
-[project.theme.font]
-text = "IBM Plex Sans"
-code = "JetBrains Mono"
+[project.theme.icon]
+logo = "lucide/square-arrow-out-up-right"
 
 [[project.extra.social]]
 icon = "fontawesome/brands/github"
