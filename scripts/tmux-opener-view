@@ -56,6 +56,8 @@ class Pdf:
 
 
 KITTY_REPLY_RE = re.compile(r"\x1b_G[^\x1b]*\x1b\\")
+# chafa's tmux-wrapped kitty commands, its raw pixels; the rest of its output are placeholder cells.
+CHAFA_PIXELS_RE = re.compile(rb"\x1bPtmux;\x1b\x1b_G[^\x1b]*\x1b\x1b\\\x1b\\")
 # Browser roles as (256-color, 8-color) foregrounds on the terminal's own background.
 COLORS = {"folder": (75, curses.COLOR_BLUE), "image": (176, curses.COLOR_MAGENTA), "pdf": (167, curses.COLOR_RED),
           "code": (71, curses.COLOR_GREEN), "data": (172, curses.COLOR_YELLOW), "archive": (166, curses.COLOR_RED),
@@ -237,21 +239,21 @@ def read_key() -> str:
 
 @functools.cache
 def chafa_pixels() -> list[str]:
-    """chafa's argv for real pixels.
+    """chafa's argv for real pixels; callers add --view-size.
 
     Probing reads terminal replies that the key reader would take for key presses.
-    chafa sends raw pixels, so upscaling and its animations flood tmux and SSH: it draws
-    one frame at the image's own size, and play() animates with PNG frames.
-    chafa 1.16 added --probe. Older versions reject it and never probe, and their
-    --exact-size=on draws a 9999-pixel-wide frame, hundreds of MB; they fit the view instead.
+    chafa 1.16 added --probe; older versions reject it and never probe. chafa only lays
+    out the frame: with_png() and play() send its pixels as PNGs. --view-size keeps an
+    image's own size and shrinks larger ones to the view, where --size fills the view and
+    --exact-size=on overflows it, or draws 9999-pixel frames before chafa 1.16.
     """
 
     try:
         usage = subprocess.run(["chafa", "--help"], capture_output=True, text=True, check=False).stdout
     except OSError:
         usage = ""
-    sizing = ["--probe=off", "--exact-size=on"] if "--probe" in usage else []
-    return ["chafa", "--format=kitty", "--passthrough=tmux", *sizing, "--animate=off", "--align=mid,mid"]
+    probe = ["--probe=off"] if "--probe" in usage else []
+    return ["chafa", "--format=kitty", "--passthrough=tmux", *probe, "--animate=off", "--align=mid,mid"]
 
 
 def page_pdf(view: Pdf) -> int:
@@ -264,12 +266,14 @@ def page_pdf(view: Pdf) -> int:
                                 "-l", str(view.page), str(view.path), str(image.with_suffix(""))],
                                stderr=subprocess.DEVNULL, check=False)
             print("\x1b[H\x1b[2J", end="", flush=True)
-            subprocess.run([*chafa_pixels(), f"--size={columns}x{rows - 1}", str(image)], check=False)
+            drawn = subprocess.run([*chafa_pixels(), f"--view-size={columns}x{rows - 1}", str(image)],
+                                   stdout=subprocess.PIPE, check=False).stdout
+            show(with_png(drawn, placement(drawn), image))
             status = f"{view.name}  page {view.page}/{view.pages}  space/b pages  g/G first/last  q close"
             print(f"\x1b[{rows};1H\x1b[2m{status[:columns]}\x1b[0m", end="", flush=True)
             page = view.page
             while page == view.page:
-                key = read_key()
+                key = KITTY_REPLY_RE.sub("", read_key())  # the terminal acknowledges the PNG
                 if key in ("q", "\x1b"):
                     print("\x1b[H\x1b[2J\x1b[?25h", end="", flush=True)
                     return 0
@@ -282,12 +286,49 @@ def kitty_png(png: bytes, keys: dict[bytes, bytes]) -> bytes:
 
     data = base64.standard_b64encode(png)
     chunks = [data[start:start + 4096] for start in range(0, len(data), 4096)]
-    sequence = b""
+    sequence = []
     for index, chunk in enumerate(chunks):
         first = b"a=T,U=1,f=100,i=%s,c=%s,r=%s," % (keys[b"i"], keys[b"c"], keys[b"r"]) if not index else b""
         command = b"\x1b_G" + first + b"m=%d;" % (index < len(chunks) - 1) + chunk + b"\x1b\\"
-        sequence += b"\x1bPtmux;" + command.replace(b"\x1b", b"\x1b\x1b") + b"\x1b\\"
-    return sequence
+        sequence.append(b"\x1bPtmux;" + command.replace(b"\x1b", b"\x1b\x1b") + b"\x1b\\")
+    return b"".join(sequence)
+
+
+def placement(drawn: bytes) -> dict[bytes, bytes]:
+    """The keys of chafa's kitty placement, such as i=7 and s=1600; empty when it drew none."""
+
+    found = re.search(rb"a=T,U=1,[^;]*", drawn)
+    return dict(field.split(b"=", 1) for field in found.group().split(b",")) if found else {}
+
+
+def fit(keys: dict[bytes, bytes]) -> str:
+    """An ffmpeg filter shrinking frames to chafa's frame size s x v; the terminal fills its cells."""
+
+    return f"scale='min(iw,{int(keys[b's'])})':'min(ih,{int(keys[b'v'])})':force_original_aspect_ratio=decrease"
+
+
+def with_png(drawn: bytes, keys: dict[bytes, bytes], path: Path) -> bytes:
+    """chafa's drawing of a still image with a PNG in place of its raw pixels, when that sends less.
+
+    Raw pixels are megabytes, seconds over SSH, for a plot that is kilobytes as a PNG. PNG
+    files that fit go as they are; ffmpeg shrinks and converts the rest at zlib level 1,
+    since the default level spends seconds on a large photo to save a seventh of the data.
+    """
+
+    if not keys:
+        return drawn
+    with path.open("rb") as handle:
+        header = handle.read(24)
+    width, height = int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+    ffmpeg, png = shutil.which("ffmpeg"), b""
+    if header.startswith(b"\x89PNG\r\n\x1a\n") and (not ffmpeg or width <= int(keys[b"s"]) and height <= int(keys[b"v"])):
+        png = path.read_bytes()
+    elif ffmpeg:
+        png = subprocess.run([ffmpeg, "-v", "error", "-i", str(path.absolute()), "-frames:v", "1", "-vf", fit(keys),
+                              "-f", "image2pipe", "-c:v", "png", "-compression_level", "1", "-"],
+                             stdin=subprocess.DEVNULL, capture_output=True, check=False).stdout
+    still = kitty_png(png, keys) + CHAFA_PIXELS_RE.sub(b"", drawn) if png else drawn
+    return min(still, drawn, key=len)
 
 
 def show(data: bytes) -> None:
@@ -311,34 +352,29 @@ def png_files(stream: IO[bytes]) -> Iterator[bytes]:
 
 
 def play(drawing: subprocess.Popen[bytes], path: Path, stop: threading.Event, shown: threading.Event) -> None:
-    """Pass chafa's frame through; GIFs instead get PNG frames under its image id.
+    """Show chafa's cells with PNG pixels under its image id; GIFs get a PNG per frame.
 
-    chafa sends raw pixels, seconds of data over SSH for a single frame. ffmpeg decodes one
-    frame at a time, so long GIFs need little memory. Each frame waits for the terminal's
-    reply to the last one, so a slow link lowers the frame rate instead of queueing frames in
-    tmux and SSH that hold back the key closing the view.
+    ffmpeg decodes one frame at a time, so long GIFs need little memory. Each frame waits for
+    the terminal's reply to the last one, so a slow link lowers the frame rate instead of
+    queueing frames in tmux and SSH that hold back the key closing the view.
     """
 
-    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
-    if path.suffix.lower() != ".gif" or not (ffmpeg and ffprobe):
-        for chunk in iter(lambda: drawing.stdout.read1(65536), b""):  # type: ignore[union-attr]
-            show(chunk)
-        return
     drawn = drawing.stdout.read()  # type: ignore[union-attr]
-    placement = re.search(rb"a=T,U=1,[^;]*", drawn)
-    if drawing.wait() or not placement:
-        show(drawn)
+    keys = {} if drawing.wait() else placement(drawn)
+    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+    if path.suffix.lower() != ".gif" or not (keys and ffmpeg and ffprobe):
+        still = with_png(drawn, keys, path)
+        if not stop.is_set():  # a key pressed during the conversion closed the view
+            show(still)
         return
-    keys = dict(field.split(b"=", 1) for field in placement.group().split(b","))
-    # Keep chafa's placeholder cells but send the pixels as PNGs.
-    cells = re.sub(rb"\x1bPtmux;\x1b\x1b_G[^\x1b]*\x1b\x1b\\\x1b\\", b"", drawn)
+    cells = CHAFA_PIXELS_RE.sub(b"", drawn)
     durations = subprocess.run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries",
                                 "packet=duration_time", "-of", "csv=p=0", "--", str(path)],
                                capture_output=True, text=True, check=False).stdout.split()
     delays = [max(float(duration), 0.02) if duration[0].isdigit() else 0.1 for duration in durations]
     # A palette per frame keeps GIF colors exact and halves the PNGs sent over the link.
     palette = "split[a][b];[a]palettegen=stats_mode=single:reserve_transparent=1[p];[b][p]paletteuse=new=1:dither=none"
-    decode = [ffmpeg, "-v", "error", "-i", str(path.absolute()), "-vsync", "passthrough", "-vf", palette,
+    decode = [ffmpeg, "-v", "error", "-i", str(path.absolute()), "-vsync", "passthrough", "-vf", f"{fit(keys)},{palette}",
               "-f", "image2pipe", "-c:v", "png", "-"]
     count = 0
     while count != 1:  # loop animations; a single frame stays up
@@ -720,7 +756,7 @@ def plan(path: Path, line: int | None = None, which=shutil.which, size: tuple[in
     if suffix in IMAGE_SUFFIXES:
         columns, rows = size
         if pixels and which("chafa"):
-            return [*chafa_pixels(), f"--size={columns}x{rows - 1}", str(path)], None
+            return [*chafa_pixels(), f"--view-size={columns}x{rows - 1}", str(path)], None
         if which("chafa"):
             # less needs a finished stream, so animations show their first frame.
             return ["chafa", "--format=symbols", "--animate=off", f"--size={columns}x{rows - 2}", str(path)], pager(name)
