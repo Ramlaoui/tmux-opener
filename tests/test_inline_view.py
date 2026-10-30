@@ -4,6 +4,7 @@ import base64
 import json
 import runpy
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -68,22 +69,23 @@ def test_tables_json_binary_and_images_pick_matching_viewers(tmp_path: Path) -> 
     assert "Install chafa" in VIEW["plan"](image, None, which_only())[0]
     producer, pager = VIEW["plan"](image, None, which_only("chafa"), (100, 30), pixels=True)
     assert producer[:3] == ["chafa", "--format=kitty", "--passthrough=tmux"] and pager is None
+    assert producer[-2:] == ["--view-size=100x29", str(image)]
 
     assert VIEW["plan"](tmp_path, None, which_only())[0] == VIEW["Folder"](tmp_path.absolute(), False)
 
 
 @pytest.mark.parametrize(("usage", "probe"), [("  --probe=BOOL  Probe terminal", True), ("  --polite=BOOL", False)])
-def test_chafa_pixels_use_probe_and_exact_size_only_from_chafa_1_16(
+def test_chafa_pixels_use_probe_only_from_chafa_1_16(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, usage: str, probe: bool
 ) -> None:
-    # chafa 1.14, in Debian trixie, rejects --probe=off, and its --exact-size=on frames are huge.
+    # chafa 1.14, in Debian trixie, rejects --probe=off; --view-size sizes frames in every version.
     chafa = tmp_path / "chafa"
     chafa.write_text(f"#!/bin/sh\necho '{usage}'\n")
     chafa.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     argv = VIEW["chafa_pixels"].__wrapped__()
     assert argv[:3] == ["chafa", "--format=kitty", "--passthrough=tmux"]
-    assert ("--probe=off" in argv) is probe and ("--exact-size=on" in argv) is probe
+    assert ("--probe=off" in argv) is probe and "--exact-size=on" not in argv
 
 
 def test_popup_runs_the_viewer_with_a_quoted_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,6 +220,43 @@ def test_png_files_split_a_stream_of_concatenated_pngs() -> None:
 
     first, second = png(b"IEND inside data"), png(b"x" * 300)
     assert list(VIEW["png_files"](io.BytesIO(first + second + second[:20]))) == [first, second]
+
+
+def test_still_images_replace_chafa_raw_pixels_with_a_png(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cells = "\U0010EEEE̅̅\U0010EEEE̅̍\n".encode()
+    drawn = VIEW["kitty_png"](b"\0" * 40 * 20 * 4, {b"i": b"7", b"c": b"2", b"r": b"1"}).replace(
+        b"f=100,", b"f=32,s=40,v=20,") + cells
+    keys = VIEW["placement"](drawn)
+    assert keys[b"s"] == b"40" and keys[b"v"] == b"20" and VIEW["placement"](cells) == {}
+
+    def sent(still: bytes) -> bytes:
+        commands = [part.replace(b"\x1b\x1b", b"\x1b") for part in still.split(b"\x1bPtmux;")[1:]]
+        assert commands[0].startswith(b"\x1b_Ga=T,U=1,f=100,i=7,c=2,r=1,") and still.endswith(cells)
+        return base64.b64decode(b"".join(command.split(b";", 1)[1].removesuffix(b"\x1b\\\x1b\\") for command in commands))
+
+    def png(width: int, height: int) -> Path:
+        path = tmp_path / f"{width}x{height}.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"rest")
+        return path
+
+    monkeypatch.setenv("PATH", str(tmp_path))  # no ffmpeg
+    assert sent(VIEW["with_png"](drawn, keys, png(30, 20))) == png(30, 20).read_bytes()
+    assert sent(VIEW["with_png"](drawn, keys, png(400, 20))) == png(400, 20).read_bytes()  # the terminal shrinks it
+    (tmp_path / "photo.jpg").write_bytes(b"\xff\xd8\xff" + b"\0" * 100)
+    assert VIEW["with_png"](drawn, keys, tmp_path / "photo.jpg") == drawn
+    assert VIEW["with_png"](cells, {}, png(30, 20)) == cells
+    big = png(30, 20)
+    big.write_bytes(big.read_bytes() + b"\0" * 20000)
+    assert VIEW["with_png"](drawn, keys, big) == drawn  # chafa's drawing is smaller
+    monkeypatch.undo()
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg converts other formats")
+    photo = tmp_path / "photo.jpg"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240", "-frames:v", "1", str(photo)],
+                   check=True)
+    shrunk = sent(VIEW["with_png"](drawn, keys, photo))
+    assert shrunk.startswith(b"\x89PNG") and (int.from_bytes(shrunk[16:20], "big"), int.from_bytes(shrunk[20:24], "big")) == (27, 20)
 
 
 def test_folder_browser_queues_marked_entries_on_the_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

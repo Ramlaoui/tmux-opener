@@ -27,7 +27,7 @@ The viewer picks the best tool the host has:
 
 ## Images and PDFs in pixels
 
-In Ghostty and kitty, `chafa` draws images with the terminal's graphics protocol. tmux keeps graphics out of popups, so image and PDF views open in a tmux window instead. GIFs play and loop when `ffmpeg` and `ffprobe` are installed, one frame at a time, so a slow link lowers the frame rate instead of the view lagging. In a PDF, <kbd>space</kbd>/<kbd>b</kbd> or the arrows change page, <kbd>g</kbd>/<kbd>G</kbd> jump to the first or last page, and `report.pdf:3` opens page 3.
+In Ghostty and kitty, `chafa` draws images with the terminal's graphics protocol. tmux keeps graphics out of popups, so image and PDF views open in a tmux window instead. Images and PDF pages are sent as PNGs, about a hundred kilobytes for a plot where raw pixels take megabytes. `ffmpeg` on the host shrinks larger images to the window and converts other formats, which otherwise go as raw pixels. GIFs play and loop when `ffmpeg` and `ffprobe` are installed, one frame at a time, so a slow link lowers the frame rate instead of the view lagging. In a PDF, <kbd>space</kbd>/<kbd>b</kbd> or the arrows change page, <kbd>g</kbd>/<kbd>G</kbd> jump to the first or last page, and `report.pdf:3` opens page 3.
 
 ## Tables
 
